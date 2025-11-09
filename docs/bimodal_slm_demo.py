@@ -4,6 +4,9 @@ Theoretical Demonstration: Bi-modal Reasoning SLM with Text and Tool Modalities
 This script demonstrates the conceptual architecture and inference flow of a
 bi-modal Small Language Model that reasons jointly over text and tool schemas.
 
+It's AI generated as a concept, and is part of docs because it's only a reference script
+to convey my idea.
+
 Key Components:
 1. Dual tokenizers (text + tool)
 2. Unified embedding space for cross-modal reasoning

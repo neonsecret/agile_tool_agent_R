@@ -18,7 +18,7 @@ You aim to build a **reasoning SLM (e.g., Gemma-270M) with two modalities:**
 - **Tool modality**, modeled and tokenized specifically to represent function signatures/schemas, arguments, and tool capabilities as structured tokens with a dedicated tokenizer/vocab.
 
 The model should *reason* across and within both modalities. This is a more general treatment than prior work like ToolGen, enabling native multi-modal reasoning and robust generalization to unseen tools and complex tool compositions.
-
+The end goal is to use this model with MCP, so it should use some format easily converted to MCP.
 ***
 
 ## Related Research
