@@ -1,0 +1,3 @@
+[submodule "dLLM-CtrlGen"]
+	path = dLLM-CtrlGen
+	url = https://github.com/neonsecret/dLLM-CtrlGen

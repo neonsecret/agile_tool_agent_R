@@ -1,0 +1,7 @@
+https://arxiv.org/html/2412.01130v2
+https://arxiv.org/html/2507.04504v2
+https://arxiv.org/html/2409.00608v1#S4
+https://arxiv.org/pdf/2507.07050
+https://arxiv.org/pdf/2503.10631
+
+https://github.com/Eric2i/dLLM-CtrlGen
