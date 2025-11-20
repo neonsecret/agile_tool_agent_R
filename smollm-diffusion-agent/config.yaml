@@ -1,0 +1,33 @@
+# Model Configuration
+model:
+  base_model_id: "HuggingFaceTB/SmolLM3-3B"
+  load_in_4bit: true
+  hidden_size: 2048 # Will be auto-detected but good to have default
+  vocab_size: 32000
+
+# Diffusion Head Configuration
+diffusion:
+  num_steps: 4
+  hidden_dim: 2048 # Should match base model hidden_size usually
+  num_layers: 2
+  num_heads: 8
+
+# Training Configuration
+training:
+  batch_size: 1
+  learning_rate: 1.0e-4
+  num_epochs: 3
+  gradient_accumulation_steps: 4
+  train_router: false
+  max_seq_len: 1024
+  max_new_tokens: 256
+  seed: 42
+  use_wandb: true
+  wandb_project: "smollm-diffusion-agent"
+
+# Data Configuration
+data:
+  dataset_name: "interstellarninja/hermes_reasoning_tool_use"
+  limit: null # Set to null for full dataset, integer for debugging
+  mask_budget: 48
+
