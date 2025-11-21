@@ -1,7 +1,7 @@
 # Model Configuration
 model:
   base_model_id: "HuggingFaceTB/SmolLM3-3B"
-  load_in_4bit: true
+  load_in_4bit: false
   hidden_size: 2048 # Will be auto-detected but good to have default
   vocab_size: 32000
 

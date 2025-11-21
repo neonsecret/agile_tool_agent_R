@@ -79,28 +79,32 @@ class HybridSmolLM(nn.Module):
             scaffold_mask
         )
 
-        total_loss = 0
+        # Initialize total_loss as a tensor to avoid int/tensor type issues
+        device = hidden_states.device
+        total_loss = torch.tensor(0.0, device=device, requires_grad=True)
         losses = {}
-
+        
         # Loss 1: Diffusion (Structured Gen)
         if labels is not None and scaffold_mask is not None:
             # Check if we have any masked tokens in this batch
             if scaffold_mask.sum() > 0:
                 active_logits = diffusion_logits[scaffold_mask]
                 active_labels = labels[scaffold_mask]
-
+                
                 diff_loss = nn.CrossEntropyLoss()(active_logits, active_labels)
-                total_loss += diff_loss
+                total_loss = total_loss + diff_loss
                 losses["diffusion"] = diff_loss
-
+            
         # Loss 2: Router (Decision)
         if router_labels is not None:
             router_loss = nn.CrossEntropyLoss()(router_logits, router_labels)
-            total_loss += router_loss
+            total_loss = total_loss + router_loss
             losses["router"] = router_loss
-
+        
+        # Return None if no losses were computed, otherwise return tensor
+        has_loss = len(losses) > 0
         return {
-            "loss": total_loss if (labels is not None or router_labels is not None) else None,
+            "loss": total_loss if has_loss else None,
             "losses": losses,
             "diffusion_logits": diffusion_logits,
             "router_logits": router_logits

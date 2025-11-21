@@ -13,7 +13,7 @@ from model.hybrid_model import HybridSmolLM
 from data.dataset_loader import SmartScaffoldDataset
 
 
-def load_config(config_path="smollm-diffusion-agent/config.yaml"):
+def load_config(config_path="config.yaml"):
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
