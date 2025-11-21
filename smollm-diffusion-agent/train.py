@@ -19,6 +19,25 @@ def load_config(config_path="config.yaml"):
         return yaml.safe_load(f)
 
 
+def load_checkpoint(checkpoint_path, model, optimizer, accelerator):
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
+
+    accelerator.print(f"Loading checkpoint from {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=accelerator.device)
+
+    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    start_epoch = checkpoint['epoch'] + 1
+    best_eval_loss = checkpoint['eval_loss']
+
+    accelerator.print(f"Resumed from epoch {checkpoint['epoch']}, best eval loss: {best_eval_loss:.4f}")
+
+    return start_epoch, best_eval_loss
+
+
 def collate_fn(batch):
     input_ids = [item['input_ids'] for item in batch]
     attention_mask = [item['attention_mask'] for item in batch]
@@ -298,14 +317,22 @@ def train():
         model, optimizer, train_dataloader, eval_dataloader
     )
 
-    # 6. Training Loop
+    # 6. Load checkpoint if resuming
+    start_epoch = 0
+    best_eval_loss = float('inf')
+    global_step = 0
+
+    if training_cfg.get("resume_from_checkpoint", False):
+        checkpoint_path = training_cfg.get("checkpoint_path", "checkpoints/best_model/model.pt")
+        start_epoch, best_eval_loss = load_checkpoint(checkpoint_path, model, optimizer, accelerator)
+        global_step = start_epoch * len(train_dataloader)
+        accelerator.print(f"Starting from epoch {start_epoch}, global step {global_step}")
+
+    # 7. Training Loop
     accelerator.print("Starting training loop...")
     model.train()
 
-    global_step = 0
-    best_eval_loss = float('inf')
-
-    for epoch in range(training_cfg["num_epochs"]):
+    for epoch in range(start_epoch, training_cfg["num_epochs"]):
         # Training epoch
         epoch_loss = 0
         epoch_diffusion_loss = 0
