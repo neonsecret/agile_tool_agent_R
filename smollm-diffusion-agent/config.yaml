@@ -1,7 +1,7 @@
 # Model Configuration
 model:
   base_model_id: "HuggingFaceTB/SmolLM3-3B"
-  load_in_4bit: false
+  load_in_4bit: true
   hidden_size: 2048 # Will be auto-detected but good to have default
   vocab_size: 32000
 
@@ -14,10 +14,10 @@ diffusion:
 
 # Training Configuration
 training:
-  batch_size: 1
+  batch_size: 2
   learning_rate: 1.0e-4
-  num_epochs: 3
-  gradient_accumulation_steps: 4
+  num_epochs: 4
+  gradient_accumulation_steps: 2
   train_router: false
   max_seq_len: 1024
   max_new_tokens: 256

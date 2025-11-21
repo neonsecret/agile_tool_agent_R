@@ -51,6 +51,10 @@ class HybridSmolLM(nn.Module):
         self.diffusion_head = SchemaDiffusionHead(hidden_size, vocab_size)
         self.router_head = RouterHead(hidden_size, num_classes=2)  # 0=Chat, 1=Tool
 
+        # Convert heads to same dtype as base model to avoid dtype mismatches
+        self.diffusion_head = self.diffusion_head.to(dtype=torch.bfloat16)
+        self.router_head = self.router_head.to(dtype=torch.bfloat16)
+
     def forward(self, input_ids, attention_mask,
                 labels=None, scaffold_mask=None, diffusion_steps=None,
                 router_labels=None):
