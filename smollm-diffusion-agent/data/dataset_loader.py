@@ -5,7 +5,7 @@ import json
 import re
 import random
 
-from .schema_builder import build_schema_template
+from .schema import build_schema_template
 
 
 class SmartScaffoldDataset(Dataset):

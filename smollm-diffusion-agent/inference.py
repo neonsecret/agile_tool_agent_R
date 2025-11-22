@@ -1,72 +1,317 @@
+"""
+Self-adaptive generation loop for diffusion LLMs with schema scaffolding.
+
+Based on: dLLM-CtrlGen/decoding/generator.py
+Implements the S3 (Schema Scaffolding) denoising loop with top-K remasking.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Sequence
+
 import torch
-from model.hybrid_model import HybridSmolLM
+import torch.nn.functional as F
 from transformers import AutoTokenizer
-import json
+from tqdm import trange
+
+from model.hybrid_model import HybridSmolLM
+from data.schema import SchemaTemplate, build_schema_template
 
 
-def inference():
+@dataclass
+class GenerationConfig:
+    """Hyperparameters controlling the denoising schedule."""
+
+    steps: int = 4
+    temperature: float = 0.0
+    cfg_scale: float = 0.0
+    topk_remask: Optional[int] = None
+    use_fp16: bool = False
+    clear_cache: bool = True
+
+
+@dataclass
+class TraceStep:
+    """Trace information for visualising the denoising process."""
+
+    step: int
+    revealed_indices: Sequence[int]
+    revealed_tokens: Optional[Sequence[str]] = None
+
+
+@dataclass
+class GenerationOutput:
+    """Structured output returned by the generator."""
+
+    text: str
+    token_ids: List[int]
+    steps_executed: int
+    trace: List[TraceStep] = field(default_factory=list)
+
+
+def _apply_gumbel_noise(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    """Apply Gumbel noise for temperature-based sampling."""
+    if temperature <= 0.0:
+        return logits
+    noise = torch.rand_like(logits)
+    noise = noise.clamp_min(1e-10)
+    gumbel = -torch.log(-torch.log(noise))
+    return logits / temperature + gumbel
+
+
+class FunctionCallGenerator:
+    """Runs the S3 denoising loop with top-K remasking."""
+
+    def __init__(
+            self,
+            model: HybridSmolLM,
+            tokenizer: AutoTokenizer,
+            device: torch.device,
+    ):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = device
+        self.model.eval()
+
+    def _build_messages(self, prompt: str) -> List[Dict[str, str]]:
+        """Build chat template messages."""
+        return [{"role": "user", "content": prompt}]
+
+    def _encode_prompt(self, prompt: str) -> torch.Tensor:
+        """Encode prompt using chat template."""
+        chat_ids = self.tokenizer.apply_chat_template(
+            self._build_messages(prompt),
+            add_generation_prompt=True,
+            tokenize=True,
+        )
+        return torch.tensor(chat_ids, dtype=torch.long, device=self.device).unsqueeze(0)
+
+    def _initialise_sequence(
+            self, prompt_ids: torch.Tensor, template: SchemaTemplate
+    ) -> torch.Tensor:
+        """Concatenate prompt with scaffold template."""
+        template_tensor = template.to_tensor(self.device).unsqueeze(0)
+        return torch.cat([prompt_ids, template_tensor], dim=1)
+
+    def _resolve_budget(self, config: GenerationConfig, total_masks: int) -> int:
+        """Calculate number of tokens to reveal per step."""
+        if config.topk_remask is not None:
+            return config.topk_remask
+        return max(1, math.ceil(total_masks / config.steps))
+
+    def _forward(
+            self,
+            sequence: torch.Tensor,
+            prompt_mask: torch.Tensor,
+            template: SchemaTemplate,
+            cfg_scale: float = 0.0,
+    ) -> torch.Tensor:
+        """Forward pass through the model."""
+        attention_mask = torch.ones_like(sequence)
+
+        with torch.no_grad():
+            outputs = self.model.base_llm(
+                input_ids=sequence,
+                attention_mask=attention_mask,
+                output_hidden_states=True
+            )
+            hidden_states = outputs.hidden_states[-1]
+
+        t = torch.zeros(sequence.shape[0], device=self.device)
+        logits = self.model.diffusion_head.predict(
+            hidden_states, sequence, t
+        )
+
+        return logits
+
+    def generate(
+            self,
+            prompt: str,
+            template: SchemaTemplate,
+            config: Optional[GenerationConfig] = None,
+            trace: bool = False,
+            callback: Optional[Callable[[int, torch.Tensor, int], None]] = None,
+    ) -> GenerationOutput:
+        """
+        Main inference loop combining AR + Scaffolding + Diffusion.
+
+        Based on dLLM-CtrlGen generator.py lines 151-278.
+
+        Args:
+            prompt: User query
+            template: SchemaTemplate with mask positions
+            config: Generation configuration
+            trace: Whether to trace denoising steps
+            callback: Optional callback function per step
+
+        Returns:
+            GenerationOutput with text and metadata
+        """
+        cfg = config or GenerationConfig()
+
+        with torch.no_grad():
+            prompt_ids = self._encode_prompt(prompt)
+            sequence = self._initialise_sequence(prompt_ids, template)
+            prompt_length = prompt_ids.shape[1]
+            del prompt_ids
+
+            prompt_mask = torch.zeros_like(sequence, dtype=torch.bool, device=self.device)
+            prompt_mask[:, :prompt_length] = True
+
+            variable_positions = [
+                prompt_length + position
+                for segment in template.field_segments
+                for position in segment.value_positions
+            ]
+            initial_variable_count = len(variable_positions)
+            del variable_positions
+
+            budget = self._resolve_budget(cfg, initial_variable_count)
+
+            generation_trace: List[TraceStep] = []
+            mask_positions = torch.zeros_like(sequence, dtype=torch.bool)
+
+            for step in trange(cfg.steps, desc="Diffusion steps"):
+                mask_positions.fill_(False)
+                mask_positions[sequence == template.mask_token_id] = True
+                mask_positions[:, :prompt_length] = False
+                mask_indices = torch.nonzero(mask_positions[0], as_tuple=False).squeeze(-1)
+
+                if mask_indices.numel() == 0:
+                    executed_steps = step
+                    break
+
+                logits = self._forward(sequence, prompt_mask, template, cfg.cfg_scale)
+                logits = _apply_gumbel_noise(logits, cfg.temperature)
+                predictions = torch.argmax(logits, dim=-1)
+
+                log_probs = F.log_softmax(logits[0, mask_indices], dim=-1)
+                del logits
+
+                mask_conf = log_probs.gather(
+                    -1, predictions[0, mask_indices].unsqueeze(-1)
+                ).squeeze(-1)
+                del log_probs
+
+                remaining = mask_indices.numel()
+                remaining_steps = cfg.steps - step
+                if remaining_steps <= 1:
+                    k = remaining
+                else:
+                    k = min(budget, remaining)
+
+                topk = torch.topk(mask_conf, k)
+                del mask_conf
+
+                selected = mask_indices[topk.indices]
+                del mask_indices, topk
+
+                sequence[0, selected] = predictions[0, selected]
+                del predictions
+
+                if trace:
+                    generation_trace.append(
+                        TraceStep(
+                            step=step,
+                            revealed_indices=selected.cpu().tolist(),
+                            revealed_tokens=None,
+                        )
+                    )
+
+                if callback is not None:
+                    callback(step, sequence.clone(), prompt_length)
+            else:
+                executed_steps = cfg.steps
+
+            response_tokens = sequence[0, prompt_length:].cpu()
+
+            if trace:
+                for trace_step in generation_trace:
+                    trace_step.revealed_tokens = [
+                        self.tokenizer.decode(
+                            [int(sequence[0, idx].item())],
+                            skip_special_tokens=False,
+                            clean_up_tokenization_spaces=False,
+                        )
+                        for idx in trace_step.revealed_indices
+                    ]
+
+            text = self.tokenizer.decode(
+                response_tokens,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+
+            del sequence, prompt_mask, mask_positions
+
+            if cfg.clear_cache:
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
+
+        return GenerationOutput(
+            text=text,
+            token_ids=response_tokens.tolist(),
+            steps_executed=executed_steps,
+            trace=generation_trace,
+        )
+
+
+def demo_inference():
+    """Demo function showing how to use the generator."""
     device = torch.device(
-        "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"
+    )
 
-    # 1. Load Model
+    print(f"Using device: {device}")
+
     model = HybridSmolLM()
     model.to(device)
     model.eval()
 
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM3-3B")
 
-    # 2. Simulate User Query & AR Decision (Pre-computed for this demo)
-    # Query: "Weather in London"
-    # Model (AR) says: <|tool_name:weather|>
+    tokenizer.add_special_tokens({'additional_special_tokens': ['<MASK>']})
+    mask_token_id = tokenizer.convert_tokens_to_ids('<MASK>')
+    model.diffusion_head.set_mask_token_id(mask_token_id)
 
-    # 3. Construct Scaffold (Python side)
-    schema = {"loc": "<MASK>"}  # Simplified
-    scaffold_str = json.dumps(schema)
+    generator = FunctionCallGenerator(model, tokenizer, device)
 
-    prompt = "<|im_start|>user\nWeather in London<|im_end|>\n<|im_start|>assistant\n" + scaffold_str
+    prompt = "What's the weather in London?"
 
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-    attention_mask = torch.ones_like(input_ids).to(device)
+    fields = [
+        ("location", 10),
+        ("unit", 3),
+    ]
 
-    # Identify mask positions
-    # In a real app, you'd map these robustly.
-    # Here we just pretend the last few tokens are the mask.
-    # Let's say we want to predict the token at index -2
+    template = build_schema_template(
+        tokenizer=tokenizer,
+        fields=fields,
+        mask_token="<MASK>",
+        include_codeblock=False
+    )
 
-    # 4. Diffusion Generation
-    # Reverse diffusion: Start from random noise (or masking) and denoise?
-    # The code in diffusion_head assumes we pass in a step `t` and it predicts the token.
-    # Usually diffusion inference starts at T=Max and goes to T=0.
+    print(f"Scaffold template: {template.text}")
 
-    print("Running Diffusion Inference...")
+    config = GenerationConfig(
+        steps=4,
+        temperature=0.0,
+        cfg_scale=0.0,
+    )
 
-    # We iterate 4 -> 3 -> 2 -> 1 -> 0
-    current_tokens = input_ids.clone()  # Start with masks
+    output = generator.generate(
+        prompt=prompt,
+        template=template,
+        config=config,
+        trace=True
+    )
 
-    mask_idx = -2  # Pretend mask is at -2
-
-    with torch.no_grad():
-        # Get base embeddings ONCE (if we assume they don't change much, or re-run if they do)
-        # The hybrid model does this internally.
-        pass
-
-    # Simplest inference loop:
-    for t in reversed(range(4)):
-        print(f"Denoising step {t}...")
-        t_tensor = torch.tensor([t], device=device)
-
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            diffusion_steps=t_tensor
-        )
-
-        logits = outputs["logits"]
-        predicted_id = logits[0, mask_idx].argmax().item()
-        print(f"Step {t} prediction: {tokenizer.decode([predicted_id])}")
-
-        # In a real diffusion loop, you'd mix this prediction with the previous state.
+    print(f"\nGenerated text: {output.text}")
+    print(f"Steps executed: {output.steps_executed}")
 
 
 if __name__ == "__main__":
-    inference()
+    demo_inference()

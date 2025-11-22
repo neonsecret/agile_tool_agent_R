@@ -270,6 +270,9 @@ def train():
     accelerator.print(f"Mask token: {tokenizer.mask_token} (ID: {tokenizer.mask_token_id})")
     accelerator.print(f"Vocabulary size: {len(tokenizer)}")
 
+    # Set mask token ID in diffusion head for proper noising
+    model.diffusion_head.set_mask_token_id(tokenizer.mask_token_id)
+
     # Load full dataset
     full_dataset = SmartScaffoldDataset(
         tokenizer,

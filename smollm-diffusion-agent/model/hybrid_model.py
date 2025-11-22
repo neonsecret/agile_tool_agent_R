@@ -48,10 +48,15 @@ class HybridSmolLM(nn.Module):
         hidden_size = self.base_llm.config.hidden_size
         vocab_size = self.base_llm.config.vocab_size
 
-        self.diffusion_head = SchemaDiffusionHead(hidden_size, vocab_size)
-        self.router_head = RouterHead(hidden_size, num_classes=2)  # 0=Chat, 1=Tool
+        self.diffusion_head = SchemaDiffusionHead(
+            input_dim=hidden_size,
+            vocab_size=vocab_size,
+            hidden_dim=1024,
+            num_layers=2,
+            num_steps=4
+        )
+        self.router_head = RouterHead(hidden_size, num_classes=2)
 
-        # Convert heads to same dtype as base model to avoid dtype mismatches
         self.diffusion_head = self.diffusion_head.to(dtype=torch.bfloat16)
         self.router_head = self.router_head.to(dtype=torch.bfloat16)
 
@@ -75,29 +80,26 @@ class HybridSmolLM(nn.Module):
         # 2. Router Forward
         router_logits = self.router_head(hidden_states)
 
-        # 3. Diffusion Forward
-        diffusion_logits = self.diffusion_head(
-            hidden_states,
-            input_ids,
-            diffusion_steps,
-            scaffold_mask
-        )
-
-        # Initialize total_loss as a tensor to avoid int/tensor type issues
         device = hidden_states.device
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)
         losses = {}
-        
-        # Loss 1: Diffusion (Structured Gen)
-        if labels is not None and scaffold_mask is not None:
-            # Check if we have any masked tokens in this batch
-            if scaffold_mask.sum() > 0:
-                active_logits = diffusion_logits[scaffold_mask]
-                active_labels = labels[scaffold_mask]
-                
-                diff_loss = nn.CrossEntropyLoss()(active_logits, active_labels)
-                total_loss = total_loss + diff_loss
-                losses["diffusion"] = diff_loss
+        diffusion_logits = None
+
+        if labels is not None and scaffold_mask is not None and scaffold_mask.sum() > 0:
+            diff_loss = self.diffusion_head.training_step(
+                tokens=labels,
+                hidden_states=hidden_states,
+                scaffold_mask=scaffold_mask
+            )
+            total_loss = total_loss + diff_loss
+            losses["diffusion"] = diff_loss
+
+            diffusion_logits = self.diffusion_head(
+                hidden_states,
+                input_ids,
+                diffusion_steps,
+                scaffold_mask
+            )
             
         # Loss 2: Router (Decision)
         if router_labels is not None:
