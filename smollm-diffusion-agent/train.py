@@ -251,7 +251,8 @@ def train():
     accelerator.print("Loading Model...")
     model = HybridSmolLM(
         base_model_id=model_cfg["base_model_id"],
-        load_in_4bit=model_cfg["load_in_4bit"]
+        load_in_4bit=model_cfg["load_in_4bit"],
+        diffusion_config=diff_cfg
     )
 
     # 3. Setup Tokenizer & Dataset

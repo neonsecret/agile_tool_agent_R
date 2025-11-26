@@ -18,7 +18,8 @@ class RouterHead(nn.Module):
 
 
 class HybridSmolLM(nn.Module):
-    def __init__(self, base_model_id="HuggingFaceTB/SmolLM3-3B", load_in_4bit=False):
+    def __init__(self, base_model_id="HuggingFaceTB/SmolLM3-3B", load_in_4bit=False,
+                 diffusion_config=None):
         super().__init__()
 
         # 1. Load Base Model (Frozen)
@@ -48,12 +49,20 @@ class HybridSmolLM(nn.Module):
         hidden_size = self.base_llm.config.hidden_size
         vocab_size = self.base_llm.config.vocab_size
 
+        # Use diffusion_config if provided, otherwise use defaults
+        if diffusion_config is None:
+            diffusion_config = {}
+        
+        hidden_dim = diffusion_config.get("hidden_dim", 1024)
+        num_layers = diffusion_config.get("num_layers", 2)
+        num_steps = diffusion_config.get("num_steps", 4)
+
         self.diffusion_head = SchemaDiffusionHead(
             input_dim=hidden_size,
             vocab_size=vocab_size,
-            hidden_dim=1024,
-            num_layers=2,
-            num_steps=4
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            num_steps=num_steps
         )
         self.router_head = RouterHead(hidden_size, num_classes=2)
 
