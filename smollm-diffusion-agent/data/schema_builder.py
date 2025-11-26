@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 from transformers import PreTrainedTokenizerBase
 
+from .utils import resolve_mask_token
+
 
 @dataclass(frozen=True)
 class FieldSegment:
@@ -51,15 +53,7 @@ def build_schema_template(
     """
     Construct a schema template for the provided fields.
     """
-
-    mask_token_id = tokenizer.convert_tokens_to_ids(mask_token)
-    if mask_token_id is None:
-        # Fallback if token is not registered but exists in vocab
-        mask_token_id = tokenizer.mask_token_id
-
-    if mask_token_id is None or mask_token_id < 0:
-        # Final fallback for models that might use a different special token logic
-        mask_token_id = tokenizer.eos_token_id
+    mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token)
 
     tokens: List[int] = []
     text_parts: List[str] = []
@@ -108,5 +102,5 @@ def build_schema_template(
         field_segments=tuple(field_segments),
         text=template_text,
         mask_token_id=mask_token_id,
-        mask_token=mask_token,
+        mask_token=mask_token_str,
     )

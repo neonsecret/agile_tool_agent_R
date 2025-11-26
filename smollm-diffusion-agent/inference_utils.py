@@ -1,7 +1,8 @@
 import torch
-from .model.hybrid_model import HybridSmolLM
-from .data.schema_builder import SchemaTemplate
-from .scheduler import DiscreteDiffusionScheduler
+from model.hybrid_model import HybridSmolLM
+from data.schema_builder import SchemaTemplate
+from scheduler import DiscreteDiffusionScheduler
+from data.utils import validate_mask_token_consistency
 
 
 class DiffusionInference:
@@ -23,6 +24,12 @@ class DiffusionInference:
                  initial_guess: torch.Tensor = None):
 
         self.model.eval()
+        
+        validate_mask_token_consistency(
+            self.model.diffusion_head.mask_token_id,
+            template.mask_token_id,
+            context=" in DiffusionInference.generate()"
+        )
 
         # 1. Prepare Input Sequence
         template_tokens = torch.tensor(template.tokens, device=self.device).unsqueeze(0)  # [1, seq]

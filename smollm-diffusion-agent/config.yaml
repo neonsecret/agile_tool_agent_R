@@ -32,4 +32,5 @@ data:
   dataset_name: "interstellarninja/hermes_reasoning_tool_use"
   limit: null # Set to null for full dataset, integer for debugging
   mask_budget: 48
+  mask_token: null # null = use EOS token, or specify token string like "<MASK>"
 

@@ -16,8 +16,16 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer
 from tqdm import trange
 
+import yaml
+
 from model.hybrid_model import HybridSmolLM
 from data.schema import SchemaTemplate, build_schema_template
+from data.utils import resolve_mask_token, validate_mask_token_consistency
+
+
+def load_config(config_path="config.yaml"):
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
 
 
 @dataclass
@@ -150,6 +158,12 @@ class FunctionCallGenerator:
             GenerationOutput with text and metadata
         """
         cfg = config or GenerationConfig()
+        
+        validate_mask_token_consistency(
+            self.model.diffusion_head.mask_token_id,
+            template.mask_token_id,
+            context=" in FunctionCallGenerator.generate()"
+        )
 
         with torch.no_grad():
             prompt_ids = self._encode_prompt(prompt)
@@ -274,8 +288,13 @@ def demo_inference():
 
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM3-3B")
 
-    tokenizer.add_special_tokens({'additional_special_tokens': ['<MASK>']})
-    mask_token_id = tokenizer.convert_tokens_to_ids('<MASK>')
+    # Load config and resolve mask token
+    config = load_config()
+    data_cfg = config.get("data", {})
+    mask_token_config = data_cfg.get("mask_token", None)
+    mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
+    
+    print(f"Using mask token: {mask_token_str} (ID: {mask_token_id})")
     model.diffusion_head.set_mask_token_id(mask_token_id)
 
     generator = FunctionCallGenerator(model, tokenizer, device)
@@ -290,8 +309,14 @@ def demo_inference():
     template = build_schema_template(
         tokenizer=tokenizer,
         fields=fields,
-        mask_token="<MASK>",
+        mask_token=mask_token_str,
         include_codeblock=False
+    )
+    
+    validate_mask_token_consistency(
+        model.diffusion_head.mask_token_id,
+        template.mask_token_id,
+        context=" in demo_inference()"
     )
 
     print(f"Scaffold template: {template.text}")

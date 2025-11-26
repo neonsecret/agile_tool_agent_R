@@ -62,7 +62,8 @@ def test_model(num_samples=5):
         tokenizer,
         limit=data_cfg["limit"],
         max_seq_len=training_cfg["max_seq_len"],
-        max_new_tokens=training_cfg["max_new_tokens"]
+        max_new_tokens=training_cfg["max_new_tokens"],
+        mask_token=tokenizer.mask_token
     )
 
     print(f"Dataset size: {len(dataset)}")

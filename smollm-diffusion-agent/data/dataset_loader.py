@@ -6,10 +6,12 @@ import re
 import random
 
 from .schema import build_schema_template
+from .utils import resolve_mask_token
 
 
 class SmartScaffoldDataset(Dataset):
-    def __init__(self, tokenizer, split="train", max_seq_len=1024, max_new_tokens=256, limit=None):
+    def __init__(self, tokenizer, split="train", max_seq_len=1024, max_new_tokens=256, limit=None,
+                 mask_token=None):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.max_new_tokens = max_new_tokens
@@ -17,11 +19,13 @@ class SmartScaffoldDataset(Dataset):
         self.padding_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
         self.eos_token_id = tokenizer.eos_token_id
 
-        # Ensure mask token
-        self.mask_token = "<MASK>"
-        self.mask_token_id = tokenizer.convert_tokens_to_ids(self.mask_token)
-        if self.mask_token_id is None:
-            self.mask_token_id = tokenizer.mask_token_id
+        if mask_token is None:
+            raise ValueError(
+                "mask_token must be provided. Use resolve_mask_token() from utils to get "
+                "the mask token string from config, or pass it explicitly."
+            )
+        
+        self.mask_token, self.mask_token_id = resolve_mask_token(tokenizer, mask_token)
 
         # Load dataset
         self.ds = load_dataset("interstellarninja/hermes_reasoning_tool_use", split=split)

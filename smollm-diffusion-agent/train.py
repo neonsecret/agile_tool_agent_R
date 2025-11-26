@@ -12,6 +12,7 @@ import wandb
 
 from model.hybrid_model import HybridSmolLM
 from data.dataset_loader import SmartScaffoldDataset
+from data.utils import resolve_mask_token, validate_mask_token_consistency
 
 
 def load_config(config_path="config.yaml"):
@@ -193,7 +194,7 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
                     pred_masked_text = tokenizer.decode(pred_tokens, skip_special_tokens=False)
 
                     # Print example
-                    accelerator.print(f"\n--- Example {i+1} ---")
+                    accelerator.print(f"\n--- Example {i + 1} ---")
                     accelerator.print(f"Input (first 200 chars):\n  {input_text[:200]}...")
                     accelerator.print(f"\nMasked positions: {masked_positions.sum().item()} tokens")
                     accelerator.print(f"Ground Truth (masked): {true_masked_text}")
@@ -262,24 +263,23 @@ def train():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Use an existing token as mask token (works in both 4-bit and non-4bit modes)
-    # We don't need to add a new token - just designate an existing one as the mask
-    if tokenizer.mask_token is None:
-        tokenizer.mask_token = tokenizer.eos_token
-        accelerator.print(f"Using token '{tokenizer.eos_token}' (ID: {tokenizer.eos_token_id}) as mask token")
+    # Resolve mask token from config
+    mask_token_config = data_cfg.get("mask_token", None)
+    mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
 
-    accelerator.print(f"Mask token: {tokenizer.mask_token} (ID: {tokenizer.mask_token_id})")
+    accelerator.print(f"Mask token: {mask_token_str} (ID: {mask_token_id})")
     accelerator.print(f"Vocabulary size: {len(tokenizer)}")
 
     # Set mask token ID in diffusion head for proper noising
-    model.diffusion_head.set_mask_token_id(tokenizer.mask_token_id)
+    model.diffusion_head.set_mask_token_id(mask_token_id)
 
     # Load full dataset
     full_dataset = SmartScaffoldDataset(
         tokenizer,
         limit=data_cfg["limit"],
         max_seq_len=training_cfg["max_seq_len"],
-        max_new_tokens=training_cfg["max_new_tokens"]
+        max_new_tokens=training_cfg["max_new_tokens"],
+        mask_token=mask_token_str
     )
 
     # Split into train/eval (90/10 split)
@@ -345,7 +345,7 @@ def train():
 
         progress_bar = tqdm(
             train_dataloader,
-            desc=f"Epoch {epoch+1}/{training_cfg['num_epochs']}",
+            desc=f"Epoch {epoch + 1}/{training_cfg['num_epochs']}",
             disable=not accelerator.is_local_main_process
         )
 
@@ -381,7 +381,7 @@ def train():
                 # Update progress bar
                 progress_bar.set_postfix({
                     'loss': f'{loss_val:.4f}',
-                    'avg_loss': f'{epoch_loss/num_batches:.4f}'
+                    'avg_loss': f'{epoch_loss / num_batches:.4f}'
                 })
 
                 # Log metrics to wandb
@@ -408,7 +408,7 @@ def train():
         avg_epoch_loss = epoch_loss / max(num_batches, 1)
         avg_diffusion_loss = epoch_diffusion_loss / max(num_batches, 1)
 
-        accelerator.print(f"\nEpoch {epoch+1} Summary:")
+        accelerator.print(f"\nEpoch {epoch + 1} Summary:")
         accelerator.print(f"  Avg Train Loss: {avg_epoch_loss:.4f}")
         accelerator.print(f"  Avg Diffusion Loss: {avg_diffusion_loss:.4f}")
         if train_router and epoch_router_loss > 0:
