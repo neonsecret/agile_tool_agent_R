@@ -60,7 +60,7 @@ class SchemaDiffusionHead(nn.Module):
         From mdlm diffusion.py q_xt method (lines 575-586).
 
         Args:
-            tokens: [batch, seq_len] clean tokens
+            tokens: [batch, seq_len] clean tokens (may contain -100 for ignore positions)
             scaffold_mask: [batch, seq_len] boolean mask (True = scaffold position)
             t: [batch] timestep in [0, 1]
 
@@ -70,6 +70,9 @@ class SchemaDiffusionHead(nn.Module):
         """
         if self.mask_token_id is None:
             raise ValueError("mask_token_id not set. Call set_mask_token_id() first.")
+
+        valid_mask = tokens >= 0
+        scaffold_mask = scaffold_mask & valid_mask
 
         sigma_t, _ = self.noise(t)
         move_chance = 1 - torch.exp(-sigma_t)
@@ -95,7 +98,9 @@ class SchemaDiffusionHead(nn.Module):
             logits: [batch, seq_len, vocab_size] predictions
         """
         context = self.input_proj(hidden_states)
-        token_emb = self.token_emb(current_tokens)
+        safe_tokens = current_tokens.clone()
+        safe_tokens[safe_tokens < 0] = 0
+        token_emb = self.token_emb(safe_tokens)
 
         if isinstance(t, (int, float)):
             t = torch.full((hidden_states.shape[0],), t, device=hidden_states.device, dtype=torch.long)
@@ -119,7 +124,7 @@ class SchemaDiffusionHead(nn.Module):
         From mdlm diffusion.py _forward_pass_diffusion.
 
         Args:
-            tokens: [batch, seq_len] clean tokens (labels)
+            tokens: [batch, seq_len] clean tokens (labels, may contain -100)
             hidden_states: [batch, seq_len, input_dim] from base model
             scaffold_mask: [batch, seq_len] boolean mask
 
@@ -127,6 +132,12 @@ class SchemaDiffusionHead(nn.Module):
             loss: scalar tensor
         """
         batch_size = tokens.shape[0]
+
+        valid_labels = tokens >= 0
+        valid_scaffold_mask = scaffold_mask & valid_labels
+
+        if valid_scaffold_mask.sum() == 0:
+            return torch.tensor(0.0, device=tokens.device, requires_grad=True)
 
         t = torch.rand(batch_size, device=tokens.device)
 
@@ -136,11 +147,13 @@ class SchemaDiffusionHead(nn.Module):
 
         logits = self.predict(hidden_states, noisy_tokens, t)
 
-        if mask_positions.sum() == 0:
+        valid_mask_positions = mask_positions & valid_labels
+
+        if valid_mask_positions.sum() == 0:
             return torch.tensor(0.0, device=tokens.device, requires_grad=True)
 
-        active_logits = logits[mask_positions]
-        active_labels = tokens[mask_positions]
+        active_logits = logits[valid_mask_positions]
+        active_labels = tokens[valid_mask_positions]
         loss = F.cross_entropy(active_logits, active_labels)
 
         return loss
