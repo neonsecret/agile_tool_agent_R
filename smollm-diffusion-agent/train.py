@@ -220,9 +220,6 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
         accelerator.print("No masked tokens found in examples")
         return {}
 
-    accelerator.print("=" * 80 + "\n")
-    model.train()
-
 
 def train():
     # Load Config

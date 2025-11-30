@@ -5,8 +5,14 @@ import json
 import re
 import random
 
-from .schema import build_schema_template
-from .utils import resolve_mask_token
+from transformers import AutoTokenizer
+
+try:
+    from .schema import build_schema_template
+    from .utils import resolve_mask_token
+except:
+    from schema import build_schema_template
+    from utils import resolve_mask_token
 
 
 class SmartScaffoldDataset(Dataset):
@@ -24,7 +30,7 @@ class SmartScaffoldDataset(Dataset):
                 "mask_token must be provided. Use resolve_mask_token() from utils to get "
                 "the mask token string from config, or pass it explicitly."
             )
-        
+
         self.mask_token, self.mask_token_id = resolve_mask_token(tokenizer, mask_token)
 
         # Load dataset
@@ -34,10 +40,10 @@ class SmartScaffoldDataset(Dataset):
     def _process_dataset(self):
         processed = []
         print("Processing dataset examples...")
-
+        failed = 0
         for i, example in enumerate(self.ds):
-            if self.limit and i >= self.limit: break
-            if i > 5000: break
+            if self.limit and i >= self.limit:
+                break
 
             conversations = example.get("conversations", [])
             tools_schema_str = example.get("tools", "[]")
@@ -45,6 +51,7 @@ class SmartScaffoldDataset(Dataset):
             try:
                 tools_schema = json.loads(tools_schema_str)
             except:
+                failed += 1
                 continue
 
             # 1. Positive Examples (Tool Calls)
@@ -72,7 +79,7 @@ class SmartScaffoldDataset(Dataset):
                         "router_label": 0
                     })
 
-        print(f"Processed {len(processed)} examples.")
+        print(f"Processed {len(processed)} examples, {failed} failed.")
         return processed
 
     def _build_prompt_context(self, msg_idx, conversations, current_text):
@@ -219,3 +226,36 @@ class SmartScaffoldDataset(Dataset):
             "diffusion_steps": torch.randint(0, 4, (1,)).item(),
             "router_label": ex["router_label"]
         }
+
+
+if __name__ == '__main__':
+    import yaml
+
+
+    def load_config(config_path="../config.yaml"):
+        with open(config_path, "r") as f:
+            return yaml.safe_load(f)
+
+
+    config = load_config()
+    training_cfg = config["training"]
+    model_cfg = config["model"]
+    data_cfg = config["data"]
+    diff_cfg = config["diffusion"]
+    tokenizer = AutoTokenizer.from_pretrained(model_cfg["base_model_id"])
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Resolve mask token from config
+    mask_token_config = data_cfg.get("mask_token", None)
+    mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
+    full_dataset = SmartScaffoldDataset(
+        tokenizer,
+        limit=data_cfg["limit"],
+        max_seq_len=training_cfg["max_seq_len"],
+        max_new_tokens=training_cfg["max_new_tokens"],
+        mask_token=mask_token_str
+    )
+    print(full_dataset)
+    print(next(iter(full_dataset)))

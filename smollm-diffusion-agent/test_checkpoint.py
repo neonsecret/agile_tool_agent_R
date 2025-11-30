@@ -54,8 +54,13 @@ def test_model(num_samples=5):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    if tokenizer.mask_token is None:
-        tokenizer.mask_token = tokenizer.eos_token
+    from data.utils import resolve_mask_token
+    
+    mask_token_config = data_cfg.get("mask_token", None)
+    mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
+    print(f"Using mask token: {mask_token_str} (ID: {mask_token_id})")
+    
+    model.diffusion_head.set_mask_token_id(mask_token_id)
 
     print(f"\nLoading dataset...")
     dataset = SmartScaffoldDataset(
@@ -63,7 +68,7 @@ def test_model(num_samples=5):
         limit=data_cfg["limit"],
         max_seq_len=training_cfg["max_seq_len"],
         max_new_tokens=training_cfg["max_new_tokens"],
-        mask_token=tokenizer.mask_token
+        mask_token=mask_token_str
     )
 
     print(f"Dataset size: {len(dataset)}")

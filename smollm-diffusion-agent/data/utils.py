@@ -5,26 +5,40 @@ def resolve_mask_token(tokenizer: PreTrainedTokenizerBase, mask_token_config=Non
     """
     Centralized mask token resolution with consistent fallback logic.
     
+    Uses <|reserved_special_token_2|> as default (matches original design intent).
+    This avoids ambiguity with EOS tokens that appear naturally in prompts.
+    
     Args:
         tokenizer: Tokenizer instance
         mask_token_config: Config value (None, string, or "eos")
+            - None: Use <|reserved_special_token_2|> (default, recommended)
+            - "eos": Use EOS token (not recommended due to ambiguity)
+            - string: Use specified token string
         
     Returns:
         tuple: (mask_token_string, mask_token_id)
     """
-    if mask_token_config is None or mask_token_config == "eos":
-        mask_token_str = tokenizer.eos_token
-        mask_token_id = tokenizer.eos_token_id
-        if tokenizer.mask_token is None:
-            tokenizer.mask_token = tokenizer.eos_token
-    else:
-        mask_token_str = mask_token_config
+    if mask_token_config is None:
+        mask_token_str = "<|reserved_special_token_2|>"
         mask_token_id = tokenizer.convert_tokens_to_ids(mask_token_str)
         if mask_token_id is None:
             mask_token_str = tokenizer.eos_token
             mask_token_id = tokenizer.eos_token_id
-            if tokenizer.mask_token is None:
-                tokenizer.mask_token = tokenizer.eos_token
+    elif mask_token_config == "eos":
+        mask_token_str = tokenizer.eos_token
+        mask_token_id = tokenizer.eos_token_id
+    else:
+        mask_token_str = mask_token_config
+        mask_token_id = tokenizer.convert_tokens_to_ids(mask_token_str)
+        if mask_token_id is None:
+            mask_token_str = "<|reserved_special_token_2|>"
+            mask_token_id = tokenizer.convert_tokens_to_ids(mask_token_str)
+            if mask_token_id is None:
+                mask_token_str = tokenizer.eos_token
+                mask_token_id = tokenizer.eos_token_id
+    
+    if tokenizer.mask_token is None:
+        tokenizer.mask_token = mask_token_str
     
     return mask_token_str, mask_token_id
 
