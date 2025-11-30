@@ -1,1 +1,3 @@
 .idea/
+wandb/
+smollm-diffusion-agent/wandb/

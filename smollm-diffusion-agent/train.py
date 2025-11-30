@@ -124,15 +124,50 @@ def evaluate(model, eval_dataloader, accelerator, train_router):
     return metrics
 
 
+def iterative_denoise(model, hidden_states, labels, scaffold_mask, num_steps=4):
+    """
+    Perform iterative denoising from pure noise to clean tokens.
+
+    Args:
+        model: The HybridSmolLM model (unwrapped)
+        hidden_states: Context embeddings from base model
+        labels: Ground truth tokens
+        scaffold_mask: Boolean mask indicating positions to denoise
+        num_steps: Number of denoising steps
+
+    Returns:
+        final_tokens: Denoised tokens after all steps
+    """
+    device = hidden_states.device
+    mask_token_id = model.diffusion_head.mask_token_id
+
+    current_tokens = labels.clone()
+    current_tokens[scaffold_mask] = mask_token_id
+
+    for step in range(num_steps, 0, -1):
+        t = torch.tensor([step], device=device, dtype=torch.long)
+
+        logits = model.diffusion_head(
+            hidden_states,
+            current_tokens,
+            t,
+            scaffold_mask
+        )
+
+        predicted_ids = torch.argmax(logits, dim=-1)
+        current_tokens[scaffold_mask] = predicted_ids[scaffold_mask]
+
+    return current_tokens
+
+
 def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examples=5):
-    """Show actual model outputs for qualitative assessment"""
+    """Show actual model outputs using proper iterative denoising"""
     model.eval()
 
     accelerator.print("\n" + "=" * 80)
-    accelerator.print("FUNCTIONAL EVALUATION - Sample Outputs")
+    accelerator.print("FUNCTIONAL EVALUATION - Sample Outputs (Iterative Denoising)")
     accelerator.print("=" * 80)
 
-    # Get a few random examples
     import random
     indices = random.sample(range(len(eval_dataset)), min(num_examples, len(eval_dataset)))
 
@@ -140,69 +175,63 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
     total_token_accuracy = 0
     total_tokens = 0
 
+    unwrapped_model = accelerator.unwrap_model(model)
+    diffusion_num_steps = unwrapped_model.diffusion_head.num_steps
+
     with torch.no_grad():
         for i, idx in enumerate(indices):
             example = eval_dataset[idx]
 
-            # Prepare batch (single example)
             input_ids = example['input_ids'].unsqueeze(0).to(accelerator.device)
             attention_mask = example['attention_mask'].unsqueeze(0).to(accelerator.device)
             scaffold_mask = example['scaffold_mask'].unsqueeze(0).to(accelerator.device)
             labels = example['labels'].unsqueeze(0).to(accelerator.device)
-            diffusion_steps = example['diffusion_steps'].unsqueeze(0).to(accelerator.device)
 
-            # Get model predictions
-            outputs = model(
+            if scaffold_mask.sum() == 0:
+                continue
+
+            outputs = unwrapped_model.base_llm(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                labels=labels,
-                scaffold_mask=scaffold_mask,
-                diffusion_steps=diffusion_steps,
-                router_labels=None
+                output_hidden_states=True
+            )
+            hidden_states = outputs.hidden_states[-1]
+
+            predicted_tokens = iterative_denoise(
+                unwrapped_model,
+                hidden_states,
+                labels,
+                scaffold_mask,
+                num_steps=diffusion_num_steps
             )
 
-            # Get diffusion logits and predictions
-            diffusion_logits = outputs.get("diffusion_logits")
-            if diffusion_logits is not None:
-                # Predict tokens
-                predicted_ids = torch.argmax(diffusion_logits, dim=-1)
+            masked_positions = scaffold_mask[0].cpu()
+            true_tokens = labels[0][masked_positions].cpu()
+            pred_tokens = predicted_tokens[0][masked_positions].cpu()
 
-                # Decode sequences
-                input_text = tokenizer.decode(input_ids[0], skip_special_tokens=False)
-                predicted_text = tokenizer.decode(predicted_ids[0], skip_special_tokens=False)
+            correct_tokens = (true_tokens == pred_tokens).sum().item()
+            num_tokens = len(true_tokens)
+            token_accuracy = correct_tokens / num_tokens if num_tokens > 0 else 0
 
-                # Get ground truth for masked positions
-                masked_positions = scaffold_mask[0].cpu()
-                if masked_positions.sum() > 0:
-                    true_tokens = labels[0][masked_positions].cpu()
-                    pred_tokens = predicted_ids[0][masked_positions].cpu()
+            total_token_accuracy += correct_tokens
+            total_tokens += num_tokens
 
-                    # Calculate token-level accuracy
-                    correct_tokens = (true_tokens == pred_tokens).sum().item()
-                    num_tokens = len(true_tokens)
-                    token_accuracy = correct_tokens / num_tokens if num_tokens > 0 else 0
+            exact_match = torch.all(true_tokens == pred_tokens).item()
+            total_exact_matches += exact_match
 
-                    total_token_accuracy += correct_tokens
-                    total_tokens += num_tokens
+            true_masked_text = tokenizer.decode(true_tokens, skip_special_tokens=False)
+            pred_masked_text = tokenizer.decode(pred_tokens, skip_special_tokens=False)
 
-                    # Check exact match
-                    exact_match = torch.all(true_tokens == pred_tokens).item()
-                    total_exact_matches += exact_match
+            input_text = tokenizer.decode(input_ids[0], skip_special_tokens=False)
 
-                    # Decode only the masked tokens
-                    true_masked_text = tokenizer.decode(true_tokens, skip_special_tokens=False)
-                    pred_masked_text = tokenizer.decode(pred_tokens, skip_special_tokens=False)
+            accelerator.print(f"\n--- Example {i + 1} ---")
+            accelerator.print(f"Input (first 200 chars):\n  {input_text[:200]}...")
+            accelerator.print(f"\nMasked positions: {masked_positions.sum().item()} tokens")
+            accelerator.print(f"Ground Truth (masked): {true_masked_text}")
+            accelerator.print(f"Predicted (masked):    {pred_masked_text}")
+            accelerator.print(f"Token Accuracy: {token_accuracy:.2%} ({correct_tokens}/{num_tokens})")
+            accelerator.print(f"Exact Match: {'✓' if exact_match else '✗'}")
 
-                    # Print example
-                    accelerator.print(f"\n--- Example {i + 1} ---")
-                    accelerator.print(f"Input (first 200 chars):\n  {input_text[:200]}...")
-                    accelerator.print(f"\nMasked positions: {masked_positions.sum().item()} tokens")
-                    accelerator.print(f"Ground Truth (masked): {true_masked_text}")
-                    accelerator.print(f"Predicted (masked):    {pred_masked_text}")
-                    accelerator.print(f"Token Accuracy: {token_accuracy:.2%} ({correct_tokens}/{num_tokens})")
-                    accelerator.print(f"Exact Match: {'✓' if exact_match else '✗'}")
-
-    # Overall stats
     accelerator.print("\n" + "-" * 80)
     if total_tokens > 0:
         overall_token_acc = total_token_accuracy / total_tokens
@@ -277,10 +306,11 @@ def train():
         max_seq_len=training_cfg["max_seq_len"],
         max_new_tokens=training_cfg["max_new_tokens"],
         mask_token=mask_token_str,
-        chat_sampling_rate=data_cfg.get("chat_sampling_rate", 0.1)
+        chat_sampling_rate=data_cfg.get("chat_sampling_rate", 0.1),
+        mask_budget=data_cfg.get("mask_budget", 48)
     )
 
-    # Split into train/eval (90/10 split)
+    # Split into train/eval (95/05 split)
     eval_size = int(0.05 * len(full_dataset))
     train_size = len(full_dataset) - eval_size
     train_dataset, eval_dataset = random_split(

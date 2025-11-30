@@ -17,12 +17,13 @@ except:
 
 class SmartScaffoldDataset(Dataset):
     def __init__(self, tokenizer, split="train", max_seq_len=1024, max_new_tokens=256, limit=None,
-                 mask_token=None, chat_sampling_rate=0.1):
+                 mask_token=None, chat_sampling_rate=0.1, mask_budget=48):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.max_new_tokens = max_new_tokens
         self.limit = limit
         self.chat_sampling_rate = chat_sampling_rate
+        self.mask_budget = mask_budget
         self.padding_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
         self.eos_token_id = tokenizer.eos_token_id
 
@@ -145,7 +146,7 @@ class SmartScaffoldDataset(Dataset):
             if self.eos_token_id is not None:
                 val_ids.append(self.eos_token_id)
 
-            budget = max(len(val_ids), 32)
+            budget = min(max(len(val_ids), 32), self.mask_budget)
             fields.append((key, budget))
             target_tokens_map[key] = val_ids
 
@@ -263,7 +264,7 @@ class SmartScaffoldDataset(Dataset):
             "attention_mask": attention_mask,
             "scaffold_mask": scaffold_mask_tensor,
             "labels": labels_tensor,
-            "diffusion_steps": torch.randint(0, 4, (1,)).item(),
+            "diffusion_steps": torch.randint(0, 5, (1,)).item(),
             "router_label": ex["router_label"]
         }
 
@@ -295,7 +296,8 @@ if __name__ == '__main__':
         limit=data_cfg["limit"],
         max_seq_len=training_cfg["max_seq_len"],
         max_new_tokens=training_cfg["max_new_tokens"],
-        mask_token=mask_token_str
+        mask_token=mask_token_str,
+        mask_budget=data_cfg.get("mask_budget", 48)
     )
     print(full_dataset)
     print(next(iter(full_dataset)))

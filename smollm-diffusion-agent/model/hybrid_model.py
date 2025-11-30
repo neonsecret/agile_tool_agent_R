@@ -71,10 +71,11 @@ class HybridSmolLM(nn.Module):
 
     def forward(self, input_ids, attention_mask,
                 labels=None, scaffold_mask=None, diffusion_steps=None,
-                router_labels=None):
+                router_labels=None, return_noisy_tokens=False):
         """
         scaffold_mask: Boolean mask for diffusion training.
         router_labels: [batch] (0 or 1) for classification training.
+        return_noisy_tokens: If True, return noisy tokens for evaluation.
         """
 
         # 1. Run Base LLM to get Context Embeddings
@@ -93,6 +94,7 @@ class HybridSmolLM(nn.Module):
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)
         losses = {}
         diffusion_logits = None
+        noisy_tokens = None
 
         if labels is not None and scaffold_mask is not None and scaffold_mask.sum() > 0:
             diff_loss = self.diffusion_head.training_step(
@@ -103,24 +105,42 @@ class HybridSmolLM(nn.Module):
             total_loss = total_loss + diff_loss
             losses["diffusion"] = diff_loss
 
-            diffusion_logits = self.diffusion_head(
-                hidden_states,
-                input_ids,
-                diffusion_steps,
-                scaffold_mask
-            )
-            
+            if diffusion_steps is not None:
+                batch_size = labels.shape[0]
+                if isinstance(diffusion_steps, int):
+                    t = torch.full((batch_size,), diffusion_steps / self.diffusion_head.num_steps,
+                                 device=device, dtype=torch.float)
+                else:
+                    t = diffusion_steps.float() / self.diffusion_head.num_steps
+                    t = t.to(device)
+
+                noisy_tokens, _ = self.diffusion_head.forward_diffusion(
+                    labels, scaffold_mask, t
+                )
+
+                diffusion_logits = self.diffusion_head(
+                    hidden_states,
+                    noisy_tokens,
+                    diffusion_steps,
+                    scaffold_mask
+                )
+
         # Loss 2: Router (Decision)
         if router_labels is not None:
             router_loss = nn.CrossEntropyLoss()(router_logits, router_labels)
             total_loss = total_loss + router_loss
             losses["router"] = router_loss
-        
+
         # Return None if no losses were computed, otherwise return tensor
         has_loss = len(losses) > 0
-        return {
+        result = {
             "loss": total_loss if has_loss else None,
             "losses": losses,
             "diffusion_logits": diffusion_logits,
             "router_logits": router_logits
         }
+
+        if return_noisy_tokens:
+            result["noisy_tokens"] = noisy_tokens
+
+        return result
