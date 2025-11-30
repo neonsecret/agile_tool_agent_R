@@ -143,7 +143,11 @@ def test_mask_token_consistency(dataset, tokenizer, mask_token_id, num_samples=1
 
 
 def test_labels_consistency(dataset, num_samples=10):
-    """Test that labels are only set where scaffold_mask is True."""
+    """Test that labels are only set where scaffold_mask is True.
+    
+    Note: scaffold_mask positions can have labels=-100 when mask budget exceeds
+    target tokens (self-adaptive masking). This is expected behavior.
+    """
     print("\n" + "=" * 80)
     print("Testing Labels Consistency")
     print("=" * 80)
@@ -157,21 +161,15 @@ def test_labels_consistency(dataset, num_samples=10):
         
         valid_labels = labels != -100
         
-        if not torch.equal(valid_labels, scaffold_mask):
-            diff_valid = valid_labels & ~scaffold_mask
-            diff_scaffold = scaffold_mask & ~valid_labels
-            
-            if diff_valid.sum() > 0:
-                errors.append(
-                    f"Sample {i}: Found {diff_valid.sum().item()} positions with labels "
-                    f"but scaffold_mask=False"
-                )
-            
-            if diff_scaffold.sum() > 0:
-                errors.append(
-                    f"Sample {i}: Found {diff_scaffold.sum().item()} positions with "
-                    f"scaffold_mask=True but labels=-100"
-                )
+        # Check that labels are ONLY set where scaffold_mask is True
+        # (scaffold_mask=True with labels=-100 is OK - means mask budget > target tokens)
+        diff_valid = valid_labels & ~scaffold_mask
+        
+        if diff_valid.sum() > 0:
+            errors.append(
+                f"Sample {i}: Found {diff_valid.sum().item()} positions with labels "
+                f"but scaffold_mask=False"
+            )
     
     if errors:
         print(f"\n❌ Found {len(errors)} errors:")

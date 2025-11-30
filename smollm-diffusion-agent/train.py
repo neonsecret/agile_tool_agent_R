@@ -276,7 +276,8 @@ def train():
         limit=data_cfg["limit"],
         max_seq_len=training_cfg["max_seq_len"],
         max_new_tokens=training_cfg["max_new_tokens"],
-        mask_token=mask_token_str
+        mask_token=mask_token_str,
+        chat_sampling_rate=data_cfg.get("chat_sampling_rate", 0.1)
     )
 
     # Split into train/eval (90/10 split)

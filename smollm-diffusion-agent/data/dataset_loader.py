@@ -17,11 +17,12 @@ except:
 
 class SmartScaffoldDataset(Dataset):
     def __init__(self, tokenizer, split="train", max_seq_len=1024, max_new_tokens=256, limit=None,
-                 mask_token=None):
+                 mask_token=None, chat_sampling_rate=0.1):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.max_new_tokens = max_new_tokens
         self.limit = limit
+        self.chat_sampling_rate = chat_sampling_rate
         self.padding_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
         self.eos_token_id = tokenizer.eos_token_id
 
@@ -68,8 +69,8 @@ class SmartScaffoldDataset(Dataset):
             # But useful for router training later.
 
             for msg_idx, msg in enumerate(conversations):
-                if msg['from'] == 'gpt' and '<tool_call>' not in msg['value'] and random.random() < 0.1:
-                    # 10% sampling of chat turns
+                if msg['from'] == 'gpt' and '<tool_call>' not in msg['value'] and random.random() < self.chat_sampling_rate:
+                    # Sample chat turns for router training (negative examples)
                     prompt, _ = self._build_prompt_context(msg_idx, conversations, msg['value'])
                     # Add router label 0 (Chat)
                     processed.append({
@@ -148,6 +149,10 @@ class SmartScaffoldDataset(Dataset):
             fields.append((key, budget))
             target_tokens_map[key] = val_ids
 
+        # Skip if no fields (empty schema)
+        if not fields:
+            return
+
         # Build Template
         template = build_schema_template(
             self.tokenizer,
@@ -155,6 +160,10 @@ class SmartScaffoldDataset(Dataset):
             self.mask_token,
             include_codeblock=False
         )
+
+        # Validate template was created successfully
+        if template is None or len(template.field_segments) == 0:
+            return
 
         processed.append({
             "prompt": prompt,
@@ -174,12 +183,20 @@ class SmartScaffoldDataset(Dataset):
         # If no template (Chat example), return minimal dict for Router Training only
         if ex["template"] is None:
             input_ids = torch.tensor(prompt_ids, dtype=torch.long)
-            # Pad/Mask everything else
+            
+            # Truncate if too long
+            if len(input_ids) > self.max_seq_len:
+                input_ids = input_ids[:self.max_seq_len]
+            
+            attention_mask = torch.ones_like(input_ids)
+            scaffold_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+            labels = torch.full_like(input_ids, -100)
+            
             return {
                 "input_ids": input_ids,
-                "attention_mask": torch.ones_like(input_ids),
-                "scaffold_mask": torch.zeros_like(input_ids, dtype=torch.bool),  # No diffusion
-                "labels": torch.full_like(input_ids, -100),
+                "attention_mask": attention_mask,
+                "scaffold_mask": scaffold_mask,
+                "labels": labels,
                 "diffusion_steps": torch.tensor(0),  # Dummy
                 "router_label": ex["router_label"]
             }
@@ -213,10 +230,33 @@ class SmartScaffoldDataset(Dataset):
         attention_mask = torch.ones_like(input_ids)
 
         if len(input_ids) > self.max_seq_len:
-            input_ids = input_ids[:self.max_seq_len]
-            scaffold_mask_tensor = scaffold_mask_tensor[:self.max_seq_len]
-            labels_tensor = labels_tensor[:self.max_seq_len]
-            attention_mask = attention_mask[:self.max_seq_len]
+            prompt_len = len(prompt_ids)
+            max_template_len = self.max_seq_len - prompt_len
+            
+            if max_template_len > 0:
+                # Preserve prompt, truncate template from end
+                input_ids = torch.cat([
+                    input_ids[:prompt_len],
+                    input_ids[prompt_len:prompt_len + max_template_len]
+                ])
+                scaffold_mask_tensor = torch.cat([
+                    scaffold_mask_tensor[:prompt_len],
+                    scaffold_mask_tensor[prompt_len:prompt_len + max_template_len]
+                ])
+                labels_tensor = torch.cat([
+                    labels_tensor[:prompt_len],
+                    labels_tensor[prompt_len:prompt_len + max_template_len]
+                ])
+                attention_mask = torch.cat([
+                    attention_mask[:prompt_len],
+                    attention_mask[prompt_len:prompt_len + max_template_len]
+                ])
+            else:
+                # Prompt is too long, truncate it (shouldn't happen normally)
+                input_ids = input_ids[:self.max_seq_len]
+                scaffold_mask_tensor = scaffold_mask_tensor[:self.max_seq_len]
+                labels_tensor = labels_tensor[:self.max_seq_len]
+                attention_mask = attention_mask[:self.max_seq_len]
 
         return {
             "input_ids": input_ids,
