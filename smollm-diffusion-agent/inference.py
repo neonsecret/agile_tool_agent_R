@@ -282,19 +282,22 @@ def demo_inference():
 
     print(f"Using device: {device}")
 
-    model = HybridSmolLM()
-    model.to(device)
-    model.eval()
-
+    # Load config and tokenizer first
+    config = load_config()
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM3-3B")
 
-    # Load config and resolve mask token
-    config = load_config()
+    # Resolve mask token
     data_cfg = config.get("data", {})
     mask_token_config = data_cfg.get("mask_token", None)
     mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
-    
+
     print(f"Using mask token: {mask_token_str} (ID: {mask_token_id})")
+    print(f"Tokenizer vocab size: {len(tokenizer)}")
+
+    # Initialize model with correct vocab size
+    model = HybridSmolLM(vocab_size=len(tokenizer))
+    model.to(device)
+    model.eval()
     model.diffusion_head.set_mask_token_id(mask_token_id)
 
     generator = FunctionCallGenerator(model, tokenizer, device)

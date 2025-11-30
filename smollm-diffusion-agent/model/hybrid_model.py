@@ -19,7 +19,7 @@ class RouterHead(nn.Module):
 
 class HybridSmolLM(nn.Module):
     def __init__(self, base_model_id="HuggingFaceTB/SmolLM3-3B", load_in_4bit=False,
-                 diffusion_config=None):
+                 diffusion_config=None, vocab_size=None):
         super().__init__()
 
         # 1. Load Base Model (Frozen)
@@ -47,12 +47,16 @@ class HybridSmolLM(nn.Module):
 
         # 2. Initialize Heads
         hidden_size = self.base_llm.config.hidden_size
-        vocab_size = self.base_llm.config.vocab_size
+
+        # Use tokenizer vocab_size if provided (includes special tokens)
+        # Otherwise fall back to model config vocab_size
+        if vocab_size is None:
+            vocab_size = self.base_llm.config.vocab_size
 
         # Use diffusion_config if provided, otherwise use defaults
         if diffusion_config is None:
             diffusion_config = {}
-        
+
         hidden_dim = diffusion_config.get("hidden_dim", 1024)
         num_layers = diffusion_config.get("num_layers", 2)
         num_steps = diffusion_config.get("num_steps", 4)
@@ -71,14 +75,23 @@ class HybridSmolLM(nn.Module):
 
     def forward(self, input_ids, attention_mask,
                 labels=None, scaffold_mask=None, diffusion_steps=None,
-                router_labels=None, return_noisy_tokens=False):
+                router_labels=None):
         """
-        scaffold_mask: Boolean mask for diffusion training.
-        router_labels: [batch] (0 or 1) for classification training.
-        return_noisy_tokens: If True, return noisy tokens for evaluation.
+        Forward pass for training.
+
+        Args:
+            input_ids: Input token IDs
+            attention_mask: Attention mask
+            labels: Ground truth tokens for diffusion loss
+            scaffold_mask: Boolean mask indicating which positions to apply diffusion
+            diffusion_steps: Unused (kept for compatibility)
+            router_labels: Ground truth labels for router classification
+
+        Returns:
+            dict with 'loss', 'losses', 'router_logits'
         """
 
-        # 1. Run Base LLM to get Context Embeddings
+        # 1. Run Base LLM to get Context Embeddings (frozen)
         with torch.no_grad():
             outputs = self.base_llm(
                 input_ids=input_ids,
@@ -93,9 +106,8 @@ class HybridSmolLM(nn.Module):
         device = hidden_states.device
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)
         losses = {}
-        diffusion_logits = None
-        noisy_tokens = None
 
+        # 3. Diffusion Loss (if applicable)
         if labels is not None and scaffold_mask is not None and scaffold_mask.sum() > 0:
             diff_loss = self.diffusion_head.training_step(
                 tokens=labels,
@@ -105,42 +117,15 @@ class HybridSmolLM(nn.Module):
             total_loss = total_loss + diff_loss
             losses["diffusion"] = diff_loss
 
-            if diffusion_steps is not None:
-                batch_size = labels.shape[0]
-                if isinstance(diffusion_steps, int):
-                    t = torch.full((batch_size,), diffusion_steps / self.diffusion_head.num_steps,
-                                 device=device, dtype=torch.float)
-                else:
-                    t = diffusion_steps.float() / self.diffusion_head.num_steps
-                    t = t.to(device)
-
-                noisy_tokens, _ = self.diffusion_head.forward_diffusion(
-                    labels, scaffold_mask, t
-                )
-
-                diffusion_logits = self.diffusion_head(
-                    hidden_states,
-                    noisy_tokens,
-                    diffusion_steps,
-                    scaffold_mask
-                )
-
-        # Loss 2: Router (Decision)
+        # 4. Router Loss (if training router)
         if router_labels is not None:
             router_loss = nn.CrossEntropyLoss()(router_logits, router_labels)
             total_loss = total_loss + router_loss
             losses["router"] = router_loss
 
-        # Return None if no losses were computed, otherwise return tensor
         has_loss = len(losses) > 0
-        result = {
+        return {
             "loss": total_loss if has_loss else None,
             "losses": losses,
-            "diffusion_logits": diffusion_logits,
             "router_logits": router_logits
         }
-
-        if return_noisy_tokens:
-            result["noisy_tokens"] = noisy_tokens
-
-        return result

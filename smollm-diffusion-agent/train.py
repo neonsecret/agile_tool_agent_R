@@ -124,19 +124,24 @@ def evaluate(model, eval_dataloader, accelerator, train_router):
     return metrics
 
 
-def iterative_denoise(model, hidden_states, labels, scaffold_mask, num_steps=4):
+def s3_denoise(model, hidden_states, labels, scaffold_mask, num_steps=4):
     """
-    Perform iterative denoising from pure noise to clean tokens.
+    S3-style top-K confidence denoising (matches inference.py strategy).
+
+    This uses the ACTUAL inference strategy:
+    - Fixed t=0 (fully denoised state)
+    - Top-K confidence-based token selection
+    - Iterative refinement over multiple steps
 
     Args:
         model: The HybridSmolLM model (unwrapped)
         hidden_states: Context embeddings from base model
-        labels: Ground truth tokens
+        labels: Ground truth tokens (used to initialize sequence)
         scaffold_mask: Boolean mask indicating positions to denoise
-        num_steps: Number of denoising steps
+        num_steps: Number of S3 denoising steps
 
     Returns:
-        final_tokens: Denoised tokens after all steps
+        final_tokens: Denoised tokens after S3 iteration
     """
     device = hidden_states.device
     mask_token_id = model.diffusion_head.mask_token_id
@@ -144,28 +149,53 @@ def iterative_denoise(model, hidden_states, labels, scaffold_mask, num_steps=4):
     current_tokens = labels.clone()
     current_tokens[scaffold_mask] = mask_token_id
 
-    for step in range(num_steps, 0, -1):
-        t = torch.tensor([step], device=device, dtype=torch.long)
+    total_masks = scaffold_mask.sum().item()
+    budget = max(1, int(total_masks / num_steps))
 
-        logits = model.diffusion_head(
-            hidden_states,
-            current_tokens,
-            t,
-            scaffold_mask
-        )
+    t = torch.zeros(1, device=device)
 
-        predicted_ids = torch.argmax(logits, dim=-1)
-        current_tokens[scaffold_mask] = predicted_ids[scaffold_mask]
+    for step in range(num_steps):
+        mask_positions = current_tokens == mask_token_id
+        mask_positions = mask_positions & scaffold_mask
+        mask_indices = torch.nonzero(mask_positions[0], as_tuple=False).squeeze(-1)
+
+        if mask_indices.numel() == 0:
+            break
+
+        logits = model.diffusion_head.predict(hidden_states, current_tokens, t)
+        predictions = torch.argmax(logits, dim=-1)
+
+        log_probs = torch.log_softmax(logits[0, mask_indices], dim=-1)
+        mask_conf = log_probs.gather(-1, predictions[0, mask_indices].unsqueeze(-1)).squeeze(-1)
+
+        remaining = mask_indices.numel()
+        remaining_steps = num_steps - step
+        if remaining_steps <= 1:
+            k = remaining
+        else:
+            k = min(budget, remaining)
+
+        topk = torch.topk(mask_conf, k)
+        selected = mask_indices[topk.indices]
+
+        current_tokens[0, selected] = predictions[0, selected]
 
     return current_tokens
 
 
 def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examples=5):
-    """Show actual model outputs using proper iterative denoising"""
+    """
+    Evaluate model using S3-style inference (matches actual inference.py strategy).
+
+    This tests the REAL inference approach:
+    - Fixed t=0 prediction
+    - Top-K confidence-based selection
+    - Iterative refinement
+    """
     model.eval()
 
     accelerator.print("\n" + "=" * 80)
-    accelerator.print("FUNCTIONAL EVALUATION - Sample Outputs (Iterative Denoising)")
+    accelerator.print("FUNCTIONAL EVALUATION - S3 Denoising Strategy")
     accelerator.print("=" * 80)
 
     import random
@@ -197,7 +227,7 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
             )
             hidden_states = outputs.hidden_states[-1]
 
-            predicted_tokens = iterative_denoise(
+            predicted_tokens = s3_denoise(
                 unwrapped_model,
                 hidden_states,
                 labels,
@@ -274,16 +304,8 @@ def train():
 
     accelerator.print(f"Using device: {accelerator.device}")
 
-    # 2. Initialize Model
-    accelerator.print("Loading Model...")
-    model = HybridSmolLM(
-        base_model_id=model_cfg["base_model_id"],
-        load_in_4bit=model_cfg["load_in_4bit"],
-        diffusion_config=diff_cfg
-    )
-
-    # 3. Setup Tokenizer & Dataset
-    accelerator.print("Loading Dataset...")
+    # 2. Setup Tokenizer First (needed for vocab size)
+    accelerator.print("Loading Tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_cfg["base_model_id"])
 
     if tokenizer.pad_token is None:
@@ -294,11 +316,22 @@ def train():
     mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
 
     accelerator.print(f"Mask token: {mask_token_str} (ID: {mask_token_id})")
-    accelerator.print(f"Vocabulary size: {len(tokenizer)}")
+    accelerator.print(f"Tokenizer vocabulary size: {len(tokenizer)}")
+
+    # 3. Initialize Model with correct vocab size
+    accelerator.print("Loading Model...")
+    model = HybridSmolLM(
+        base_model_id=model_cfg["base_model_id"],
+        load_in_4bit=model_cfg["load_in_4bit"],
+        diffusion_config=diff_cfg,
+        vocab_size=len(tokenizer)  # Use tokenizer vocab size!
+    )
 
     # Set mask token ID in diffusion head for proper noising
     model.diffusion_head.set_mask_token_id(mask_token_id)
 
+    # 4. Setup Dataset
+    accelerator.print("Loading Dataset...")
     # Load full dataset
     full_dataset = SmartScaffoldDataset(
         tokenizer,

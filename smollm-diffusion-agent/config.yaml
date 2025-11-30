@@ -14,7 +14,7 @@ diffusion:
 
 # Training Configuration
 training:
-  batch_size: 3
+  batch_size: 2
   learning_rate: 1.0e-4
   num_epochs: 4
   gradient_accumulation_steps: 2
@@ -24,7 +24,7 @@ training:
   seed: 42
   use_wandb: true
   wandb_project: "smollm-diffusion-agent"
-  resume_from_checkpoint: true
+  resume_from_checkpoint: false
   checkpoint_path: "checkpoints/best_model/model.pt"
 
 # Data Configuration
