@@ -13,6 +13,8 @@ from transformers import AutoTokenizer
 # Use same import style as train.py
 from data.dataset_loader import SmartScaffoldDataset
 from data.utils import resolve_mask_token
+from model.hybrid_model import HybridSmolLM
+from model.diffusion_head import SchemaDiffusionHead
 
 
 def load_config(config_path="config.yaml"):
@@ -32,7 +34,7 @@ def test_dataset_structure(dataset, tokenizer, num_samples=10):
     for i in range(min(num_samples, len(dataset))):
         sample = dataset[i]
         
-        required_keys = ["input_ids", "attention_mask", "scaffold_mask", "labels", "diffusion_steps", "router_label"]
+        required_keys = ["input_ids", "attention_mask", "scaffold_mask", "labels", "router_label"]
         missing_keys = [k for k in required_keys if k not in sample]
         if missing_keys:
             errors.append(f"Sample {i}: Missing keys: {missing_keys}")
@@ -65,9 +67,6 @@ def test_dataset_structure(dataset, tokenizer, num_samples=10):
         
         if not isinstance(labels, torch.Tensor):
             errors.append(f"Sample {i}: labels is not a tensor")
-        
-        if not isinstance(sample["diffusion_steps"], (int, torch.Tensor)):
-            errors.append(f"Sample {i}: diffusion_steps is not int or tensor")
         
         if not isinstance(sample["router_label"], (int, torch.Tensor)):
             errors.append(f"Sample {i}: router_label is not int or tensor")
@@ -253,6 +252,182 @@ def show_examples(dataset, tokenizer, mask_token_id, num_examples=3):
                 print(f"  {label_text[:100]}...")
 
 
+def debug_model_input_output(dataset, tokenizer, mask_token_id, model, num_examples=3):
+    """Debug what dataset feeds to model and what model expects to produce."""
+    print("\n" + "=" * 80)
+    print("DEBUGGING: Dataset -> Model Flow")
+    print("=" * 80)
+    
+    device = next(model.parameters()).device
+    model.eval()
+    
+    for i in range(min(num_examples, len(dataset))):
+        sample = dataset[i]
+        
+        input_ids = sample["input_ids"].unsqueeze(0).to(device)
+        attention_mask = sample["attention_mask"].unsqueeze(0).to(device)
+        scaffold_mask = sample["scaffold_mask"].unsqueeze(0).to(device)
+        labels = sample["labels"].unsqueeze(0).to(device)
+        router_label = sample["router_label"]
+        
+        print(f"\n{'='*80}")
+        print(f"EXAMPLE {i+1}")
+        print(f"{'='*80}")
+        
+        print(f"\n1. DATASET OUTPUT:")
+        print(f"   Router label: {router_label} ({'Chat' if router_label == 0 else 'Tool Call'})")
+        print(f"   Sequence length: {input_ids.shape[1]}")
+        print(f"   Scaffold mask positions: {scaffold_mask.sum().item()}")
+        print(f"   Valid labels (non -100): {(labels != -100).sum().item()}")
+        
+        if scaffold_mask.sum() == 0:
+            print("\n   ⚠️  No scaffold mask positions - skipping diffusion analysis")
+            continue
+        
+        mask_positions = scaffold_mask[0]
+        mask_indices = torch.nonzero(mask_positions, as_tuple=True)[0]
+        
+        print(f"\n   Mask positions (first 20): {mask_indices[:20].tolist()}")
+        
+        input_mask_tokens = input_ids[0][mask_positions]
+        expected_labels = labels[0][mask_positions]
+        valid_labels_mask = expected_labels != -100
+        
+        print(f"\n   Input mask tokens at scaffold positions:")
+        print(f"     Token IDs: {input_mask_tokens[:20].tolist()}")
+        print(f"     All are mask_token_id ({mask_token_id})? {torch.all(input_mask_tokens == mask_token_id)}")
+        
+        print(f"\n   Expected labels at scaffold positions:")
+        print(f"     Label IDs: {expected_labels[:20].tolist()}")
+        print(f"     Valid labels count: {valid_labels_mask.sum().item()}/{len(expected_labels)}")
+        
+        if valid_labels_mask.sum() > 0:
+            valid_label_ids = expected_labels[valid_labels_mask][:20]
+            valid_label_text = tokenizer.decode(valid_label_ids, skip_special_tokens=False)
+            print(f"     Valid label text (first 100 chars): {valid_label_text[:100]}")
+        
+        print(f"\n2. MODEL FORWARD PASS:")
+        
+        with torch.no_grad():
+            base_outputs = model.base_llm(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True
+            )
+            hidden_states = base_outputs.hidden_states[-1]
+            
+            print(f"   Hidden states shape: {hidden_states.shape}")
+            print(f"   Hidden states dtype: {hidden_states.dtype}")
+        
+        print(f"\n3. DIFFUSION HEAD ANALYSIS:")
+        
+        diffusion_head = model.diffusion_head
+        
+        print(f"   Mask token ID in model: {diffusion_head.mask_token_id}")
+        print(f"   Vocab size: {diffusion_head.vocab_size}")
+        print(f"   Hidden dim: {diffusion_head.hidden_dim}")
+        print(f"   Num steps: {diffusion_head.num_steps}")
+        
+        if diffusion_head.mask_token_id != mask_token_id:
+            print(f"   ⚠️  WARNING: Mask token mismatch!")
+            print(f"      Dataset uses: {mask_token_id}")
+            print(f"      Model uses: {diffusion_head.mask_token_id}")
+        
+        print(f"\n4. SIMULATING TRAINING STEP:")
+        
+        with torch.no_grad():
+            batch_size = labels.shape[0]
+            t = torch.rand(batch_size, device=device)
+            
+            print(f"   Random timestep t: {t.item():.4f}")
+            
+            noisy_tokens, mask_positions_diff = diffusion_head.forward_diffusion(
+                labels, scaffold_mask, t
+            )
+            
+            print(f"   After forward diffusion:")
+            print(f"     Masked positions: {mask_positions_diff.sum().item()}")
+            
+            if mask_positions_diff.sum() > 0:
+                noisy_at_masks = noisy_tokens[0][mask_positions_diff[0]]
+                print(f"     Noisy tokens at masked positions (first 10): {noisy_at_masks[:10].tolist()}")
+                print(f"     All are mask_token_id? {torch.all(noisy_at_masks == mask_token_id)}")
+            
+            logits = diffusion_head.predict(hidden_states, noisy_tokens, t)
+            
+            print(f"   Prediction logits shape: {logits.shape}")
+            
+            valid_mask_positions = mask_positions_diff & (labels >= 0) & scaffold_mask
+            
+            if valid_mask_positions.sum() > 0:
+                active_logits = logits[valid_mask_positions]
+                active_labels = labels[valid_mask_positions]
+                
+                predictions = torch.argmax(active_logits, dim=-1)
+                
+                print(f"\n   Predictions vs Expected:")
+                print(f"     Active positions: {valid_mask_positions.sum().item()}")
+                print(f"     Predictions (first 20): {predictions[:20].tolist()}")
+                print(f"     Expected (first 20): {active_labels[:20].tolist()}")
+                
+                correct = (predictions == active_labels).sum().item()
+                total = len(predictions)
+                accuracy = correct / total if total > 0 else 0
+                
+                print(f"     Accuracy: {accuracy:.2%} ({correct}/{total})")
+                
+                if total > 0:
+                    pred_text = tokenizer.decode(predictions[:20], skip_special_tokens=False)
+                    expected_text = tokenizer.decode(active_labels[:20], skip_special_tokens=False)
+                    print(f"     Predicted text (first 100 chars): {pred_text[:100]}")
+                    print(f"     Expected text (first 100 chars): {expected_text[:100]}")
+            else:
+                print(f"   ⚠️  No valid mask positions for loss calculation")
+        
+        print(f"\n5. INPUT/OUTPUT SUMMARY:")
+        print(f"   Dataset provides:")
+        print(f"     - input_ids: {input_ids.shape} (contains mask tokens at scaffold positions)")
+        print(f"     - scaffold_mask: {scaffold_mask.shape} (marks positions to denoise)")
+        print(f"     - labels: {labels.shape} (ground truth tokens, -100 for ignore)")
+        print(f"     - attention_mask: {attention_mask.shape}")
+        
+        print(f"\n   Model expects to:")
+        print(f"     - Receive hidden_states from base LLM: {hidden_states.shape}")
+        print(f"     - Predict tokens at scaffold_mask positions")
+        print(f"     - Match labels where labels != -100")
+        
+        print(f"\n   Data flow:")
+        print(f"     1. Dataset puts mask_token_id ({mask_token_id}) in input_ids at scaffold positions")
+        print(f"     2. Base LLM processes input_ids -> hidden_states")
+        print(f"     3. Diffusion head receives labels (ground truth) and scaffold_mask")
+        print(f"     4. Forward diffusion adds noise to labels at scaffold positions")
+        print(f"     5. Diffusion head predicts original tokens from noisy state")
+        print(f"     6. Loss computed on predictions vs labels at masked positions")
+        
+        print(f"\n6. TRAINING LOSS COMPUTATION:")
+        
+        with torch.no_grad():
+            training_loss = model.diffusion_head.training_step(
+                tokens=labels,
+                hidden_states=hidden_states,
+                scaffold_mask=scaffold_mask
+            )
+            
+            print(f"   Training loss: {training_loss.item():.4f}")
+            
+            if training_loss.item() > 0:
+                print(f"   ✓ Loss is computed correctly")
+            else:
+                print(f"   ⚠️  Loss is 0 (no valid positions for loss)")
+        
+        print(f"\n7. KEY INSIGHTS:")
+        print(f"   - Dataset creates {scaffold_mask.sum().item()} scaffold positions")
+        print(f"   - Only {(labels != -100).sum().item()} positions have valid labels")
+        print(f"   - This is expected when mask_budget > actual target token count")
+        print(f"   - Model will only learn on positions with valid labels (non -100)")
+        print(f"   - Positions with labels=-100 are ignored in loss computation")
+
+
 def test_chat_examples(dataset, num_samples=10):
     """Test that chat examples (router_label=0) have no scaffold_mask."""
     print("\n" + "=" * 80)
@@ -292,13 +467,14 @@ def test_chat_examples(dataset, num_samples=10):
 
 
 def main():
-    print("Dataset Test Script")
+    print("Dataset Test Script with Model Debugging")
     print("=" * 80)
     
     config = load_config()
     model_cfg = config["model"]
     data_cfg = config["data"]
     training_cfg = config["training"]
+    diff_cfg = config.get("diffusion", {})
     
     tokenizer = AutoTokenizer.from_pretrained(model_cfg["base_model_id"])
     
@@ -319,7 +495,8 @@ def main():
         max_seq_len=training_cfg["max_seq_len"],
         max_new_tokens=training_cfg["max_new_tokens"],
         limit=data_cfg.get("limit", 100),
-        mask_token=mask_token_str
+        mask_token=mask_token_str,
+        mask_budget=data_cfg.get("mask_budget", 48)
     )
     
     print(f"Dataset size: {len(dataset)}")
@@ -338,6 +515,29 @@ def main():
     results["chat_examples"] = test_chat_examples(dataset, num_test_samples)
     
     show_examples(dataset, tokenizer, mask_token_id, num_examples=3)
+    
+    print("\n" + "=" * 80)
+    print("Loading Model for Debugging...")
+    print("=" * 80)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    model = HybridSmolLM(
+        base_model_id=model_cfg["base_model_id"],
+        load_in_4bit=model_cfg.get("load_in_4bit", False),
+        diffusion_config=diff_cfg,
+        vocab_size=len(tokenizer)
+    )
+    model.diffusion_head.set_mask_token_id(mask_token_id)
+    model = model.to(device)
+    
+    print(f"Model loaded successfully")
+    print(f"Diffusion head mask_token_id: {model.diffusion_head.mask_token_id}")
+    
+    debug_model_input_output(
+        dataset, tokenizer, mask_token_id, model, num_examples=3
+    )
     
     print("\n" + "=" * 80)
     print("Test Summary")

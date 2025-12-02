@@ -74,7 +74,7 @@ class HybridSmolLM(nn.Module):
         self.router_head = self.router_head.to(dtype=torch.bfloat16)
 
     def forward(self, input_ids, attention_mask,
-                labels=None, scaffold_mask=None, diffusion_steps=None,
+                labels=None, scaffold_mask=None,
                 router_labels=None):
         """
         Forward pass for training.
@@ -84,7 +84,6 @@ class HybridSmolLM(nn.Module):
             attention_mask: Attention mask
             labels: Ground truth tokens for diffusion loss
             scaffold_mask: Boolean mask indicating which positions to apply diffusion
-            diffusion_steps: Unused (kept for compatibility)
             router_labels: Ground truth labels for router classification
 
         Returns:

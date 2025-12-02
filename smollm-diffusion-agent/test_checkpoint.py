@@ -86,14 +86,12 @@ def test_model(num_samples=5):
             attention_mask = example['attention_mask'].unsqueeze(0).to(device)
             scaffold_mask = example['scaffold_mask'].unsqueeze(0).to(device)
             labels = example['labels'].unsqueeze(0).to(device)
-            diffusion_steps = torch.tensor([example['diffusion_steps']]).to(device)
 
             outputs = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 labels=labels,
                 scaffold_mask=scaffold_mask,
-                diffusion_steps=diffusion_steps,
                 router_labels=None
             )
 

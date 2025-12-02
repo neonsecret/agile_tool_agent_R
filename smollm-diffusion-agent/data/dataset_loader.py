@@ -198,7 +198,6 @@ class SmartScaffoldDataset(Dataset):
                 "attention_mask": attention_mask,
                 "scaffold_mask": scaffold_mask,
                 "labels": labels,
-                "diffusion_steps": torch.tensor(0),  # Dummy
                 "router_label": ex["router_label"]
             }
 
@@ -264,7 +263,6 @@ class SmartScaffoldDataset(Dataset):
             "attention_mask": attention_mask,
             "scaffold_mask": scaffold_mask_tensor,
             "labels": labels_tensor,
-            "diffusion_steps": torch.randint(0, 5, (1,)).item(),
             "router_label": ex["router_label"]
         }
 

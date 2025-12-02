@@ -44,7 +44,6 @@ def collate_fn(batch):
     attention_mask = [item['attention_mask'] for item in batch]
     scaffold_mask = [item['scaffold_mask'] for item in batch]
     labels = [item['labels'] for item in batch]
-    diffusion_steps = torch.tensor([item['diffusion_steps'] for item in batch])
 
     router_labels = None
     if 'router_label' in batch[0]:
@@ -59,8 +58,7 @@ def collate_fn(batch):
         "input_ids": input_ids_padded,
         "attention_mask": attention_mask_padded,
         "scaffold_mask": scaffold_mask_padded,
-        "labels": labels_padded,
-        "diffusion_steps": diffusion_steps
+        "labels": labels_padded
     }
 
     if router_labels is not None:
@@ -90,7 +88,6 @@ def evaluate(model, eval_dataloader, accelerator, train_router):
                 attention_mask=batch["attention_mask"],
                 labels=batch["labels"],
                 scaffold_mask=batch["scaffold_mask"],
-                diffusion_steps=batch["diffusion_steps"],
                 router_labels=current_router_labels
             )
 
@@ -419,7 +416,6 @@ def train():
                     attention_mask=batch["attention_mask"],
                     labels=batch["labels"],
                     scaffold_mask=batch["scaffold_mask"],
-                    diffusion_steps=batch["diffusion_steps"],
                     router_labels=current_router_labels
                 )
 
