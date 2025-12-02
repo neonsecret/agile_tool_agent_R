@@ -457,6 +457,33 @@ def train():
                 optimizer.zero_grad()
                 global_step += 1
 
+            # Step-based functional evaluation
+            eval_every_n_steps = training_cfg.get("eval_every_n_steps", 1000)
+            eval_num_samples = training_cfg.get("eval_num_samples", 10)
+
+            if (global_step > 0 and
+                    global_step % eval_every_n_steps == 0 and
+                    accelerator.is_main_process):
+                accelerator.print(f"\n{'=' * 80}")
+                accelerator.print(f"Running functional evaluation at step {global_step}")
+                accelerator.print(f"{'=' * 80}")
+
+                functional_metrics = functional_evaluation(
+                    model=model,
+                    eval_dataset=eval_dataset,
+                    tokenizer=tokenizer,
+                    accelerator=accelerator,
+                    num_examples=eval_num_samples
+                )
+
+                if functional_metrics and training_cfg["use_wandb"]:
+                    # Add step prefix to metrics
+                    step_metrics = {f"step_{k}": v for k, v in functional_metrics.items()}
+                    step_metrics["train/step"] = global_step
+                    accelerator.log(step_metrics, step=global_step)
+
+                model.train()
+
             # Optional: Regular cleanup
             if global_step % 100 == 0:
                 torch.cuda.empty_cache() if torch.cuda.is_available() else None
