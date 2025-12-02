@@ -7,4 +7,5 @@ bitsandbytes
 deepspeed
 sentencepiece
 protobuf
-
+wandb
+hf_transfer
