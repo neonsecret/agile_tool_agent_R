@@ -143,6 +143,10 @@ def s3_denoise(model, hidden_states, labels, scaffold_mask, num_steps=4):
     device = hidden_states.device
     mask_token_id = model.diffusion_head.mask_token_id
 
+    # Convert hidden_states to match diffusion head dtype (bfloat16)
+    diffusion_head_dtype = next(model.diffusion_head.parameters()).dtype
+    hidden_states = hidden_states.to(dtype=diffusion_head_dtype)
+
     current_tokens = labels.clone()
     current_tokens[scaffold_mask] = mask_token_id
 

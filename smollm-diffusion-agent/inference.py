@@ -126,6 +126,10 @@ class FunctionCallGenerator:
                 output_hidden_states=True
             )
             hidden_states = outputs.hidden_states[-1]
+            
+            # Convert hidden_states to match diffusion head dtype (bfloat16)
+            diffusion_head_dtype = next(self.model.diffusion_head.parameters()).dtype
+            hidden_states = hidden_states.to(dtype=diffusion_head_dtype)
 
         t = torch.zeros(sequence.shape[0], device=self.device)
         logits = self.model.diffusion_head.predict(
