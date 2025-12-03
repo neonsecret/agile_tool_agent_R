@@ -240,18 +240,30 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
             true_tokens = labels[0][masked_positions].cpu()
             pred_tokens = predicted_tokens[0][masked_positions].cpu()
 
-            correct_tokens = (true_tokens == pred_tokens).sum().item()
-            num_tokens = len(true_tokens)
+            # Filter out invalid token IDs (-100 is padding/ignore token)
+            valid_mask = (true_tokens >= 0) & (true_tokens < len(tokenizer))
+            true_tokens_valid = true_tokens[valid_mask]
+            pred_tokens_valid = pred_tokens[valid_mask]
+
+            if len(true_tokens_valid) == 0:
+                continue
+
+            correct_tokens = (true_tokens_valid == pred_tokens_valid).sum().item()
+            num_tokens = len(true_tokens_valid)
             token_accuracy = correct_tokens / num_tokens if num_tokens > 0 else 0
 
             total_token_accuracy += correct_tokens
             total_tokens += num_tokens
 
-            exact_match = torch.all(true_tokens == pred_tokens).item()
+            exact_match = torch.all(true_tokens_valid == pred_tokens_valid).item()
             total_exact_matches += exact_match
 
-            true_masked_text = tokenizer.decode(true_tokens, skip_special_tokens=False)
-            pred_masked_text = tokenizer.decode(pred_tokens, skip_special_tokens=False)
+            # Convert to list of integers for tokenizer.decode
+            true_tokens_list = true_tokens_valid.tolist()
+            pred_tokens_list = pred_tokens_valid.tolist()
+
+            true_masked_text = tokenizer.decode(true_tokens_list, skip_special_tokens=False)
+            pred_masked_text = tokenizer.decode(pred_tokens_list, skip_special_tokens=False)
 
             input_text = tokenizer.decode(input_ids[0], skip_special_tokens=False)
 
