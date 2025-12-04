@@ -27,6 +27,7 @@ import yaml
 from model.hybrid_model import HybridSmolLM
 from data.schema import SchemaTemplate, build_schema_template
 from data.utils import resolve_mask_token, resolve_null_token, validate_mask_token_consistency
+from data.device_utils import empty_cache, synchronize
 
 
 def load_config(config_path="config.yaml"):
@@ -180,7 +181,7 @@ class FunctionCallGenerator:
         for _ in range(3):
             _ = self.model.diffusion_head.predict(hidden_states, current_tokens, t)
         
-        torch.cuda.synchronize()
+        synchronize(self.device)
         
         # Create static input tensors for graph
         self._graph_inputs = {
@@ -546,8 +547,7 @@ class FunctionCallGenerator:
             self._cached_prompt_length = 0
 
             if cfg.clear_cache:
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
+                empty_cache(self.device)
 
         return GenerationOutput(
             text=text,

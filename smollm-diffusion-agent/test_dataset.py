@@ -520,7 +520,8 @@ def main():
     print("Loading Model for Debugging...")
     print("=" * 80)
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from data.device_utils import get_device
+    device = get_device()
     print(f"Using device: {device}")
     
     model = HybridSmolLM(

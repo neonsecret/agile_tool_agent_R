@@ -9,7 +9,7 @@ from accelerate.utils import set_seed
 from tqdm.auto import tqdm
 import os
 import wandb
-
+from data.device_utils import empty_cache
 from model.hybrid_model import HybridSmolLM
 from data.dataset_loader import SmartScaffoldDataset
 from data.utils import resolve_mask_token, resolve_null_token, validate_mask_token_consistency
@@ -30,7 +30,7 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
     unwrapped_model = accelerator.unwrap_model(model)
     unwrapped_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    
+
     # Load scheduler state if available
     if 'scheduler_state_dict' in checkpoint and scheduler is not None:
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -167,7 +167,7 @@ def s3_denoise(model, hidden_states, labels, scaffold_mask, num_steps=4):
 
         if mask_indices.numel() == 0:
             break
-        
+
         # Handle 0D tensor case (single mask position)
         if mask_indices.dim() == 0:
             mask_indices = mask_indices.unsqueeze(0)
@@ -261,12 +261,12 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
                 true_tokens_valid = true_tokens_valid[true_tokens_valid != null_token_id]
                 # Remove NULL tokens from predictions (model may predict NULL for unused slots)
                 pred_tokens_valid = pred_tokens_valid[pred_tokens_valid != null_token_id]
-            
+
             # Align lengths: compare only up to minimum length (handles variable-length fields)
             min_len = min(len(true_tokens_valid), len(pred_tokens_valid))
             if min_len == 0:
                 continue
-            
+
             true_tokens_aligned = true_tokens_valid[:min_len]
             pred_tokens_aligned = pred_tokens_valid[:min_len]
 
@@ -298,7 +298,7 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
             accelerator.print(f"Exact Match: {'✓' if exact_match else '✗'}")
 
     accelerator.print("\n" + "-" * 80)
-    torch.cuda.empty_cache()
+    empty_cache(accelerator.device)
     if total_tokens > 0:
         overall_token_acc = total_token_accuracy / total_tokens
         overall_exact_match = total_exact_matches / len(indices)
@@ -350,7 +350,7 @@ def train():
     # Resolve mask token from config
     mask_token_config = data_cfg.get("mask_token", None)
     mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
-    
+
     # Resolve NULL token for self-adaptive masking (variable-length fields)
     null_token_config = data_cfg.get("null_token", None)
     null_token_str, null_token_id = None, None
@@ -376,7 +376,7 @@ def train():
 
     # Set mask token ID in diffusion head for proper noising
     model.diffusion_head.set_mask_token_id(mask_token_id)
-    
+
     # Set NULL token ID for self-adaptive masking
     if null_token_id is not None:
         model.diffusion_head.set_null_token_id(null_token_id)
@@ -428,24 +428,24 @@ def train():
         params_to_optimize = list(model.diffusion_head.parameters())
 
     optimizer = AdamW(params_to_optimize, lr=float(training_cfg["learning_rate"]))
-    
+
     # 5. Learning Rate Scheduler (Cosine with Warmup)
     # From guide.md: warmup_steps=2500, cosine decay
     num_epochs = training_cfg["num_epochs"]
     gradient_accumulation_steps = training_cfg["gradient_accumulation_steps"]
     num_update_steps_per_epoch = len(train_dataloader) // gradient_accumulation_steps
     total_training_steps = num_epochs * num_update_steps_per_epoch
-    
+
     warmup_steps = training_cfg.get("warmup_steps", 2500)
     # Cap warmup to 10% of total steps if total steps is smaller
     warmup_steps = min(warmup_steps, int(0.1 * total_training_steps))
-    
+
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=warmup_steps,
         num_training_steps=total_training_steps
     )
-    
+
     accelerator.print(f"LR Scheduler: Cosine with warmup")
     accelerator.print(f"  Total training steps: {total_training_steps}")
     accelerator.print(f"  Warmup steps: {warmup_steps}")
@@ -533,7 +533,7 @@ def train():
                 scheduler.step()  # Step LR scheduler
                 optimizer.zero_grad()
                 global_step += 1
-                
+
                 # Log learning rate
                 if global_step % 100 == 0:
                     current_lr = scheduler.get_last_lr()[0]
@@ -568,7 +568,7 @@ def train():
 
             # Optional: Regular cleanup
             if global_step % 100 == 0:
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                empty_cache(accelerator.device)
 
         # Epoch summary
         avg_epoch_loss = epoch_loss / max(num_batches, 1)

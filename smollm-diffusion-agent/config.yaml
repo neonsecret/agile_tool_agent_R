@@ -38,6 +38,6 @@ data:
   limit: null # Set to null for full dataset, integer for debugging
   mask_budget: 48
   mask_token: null # null = use <|reserved_special_token_2|> (recommended), "eos" = use EOS, or specify token string
-  null_token: null # null = use <|reserved_special_token_3|> for variable-length fields (automatic budgeting)
+  null_token: null # null = use <|reserved_special_token_11|> for variable-length fields (automatic budgeting)
   chat_sampling_rate: 0.1  # Sampling rate for chat examples (router_label=0). 0.1 = 10% of chat turns
 

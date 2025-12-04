@@ -3,6 +3,7 @@ import yaml
 from transformers import AutoTokenizer
 from model.hybrid_model import HybridSmolLM
 from data.dataset_loader import SmartScaffoldDataset
+from data.device_utils import get_device
 import os
 
 
@@ -37,7 +38,7 @@ def test_model(num_samples=5):
     model_cfg = config["model"]
     data_cfg = config["data"]
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     print(f"Using device: {device}")
 
     checkpoint_path = training_cfg.get("checkpoint_path", "checkpoints/best_model/model.pt")

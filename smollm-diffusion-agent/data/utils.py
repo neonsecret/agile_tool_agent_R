@@ -47,21 +47,21 @@ def resolve_null_token(tokenizer: PreTrainedTokenizerBase, null_token_config=Non
     """
     Resolve NULL token for self-adaptive masking (variable-length fields).
     
-    Uses <|reserved_special_token_3|> as default.
+    Uses <|reserved_special_token_11|> as default.
     The NULL token indicates "unused slot" in the scaffold - model learns to
     predict NULL for positions beyond the actual content length.
     
     Args:
         tokenizer: Tokenizer instance
         null_token_config: Config value (None or string)
-            - None: Use <|reserved_special_token_3|> (default)
+            - None: Use <|reserved_special_token_11|> (default)
             - string: Use specified token string
         
     Returns:
         tuple: (null_token_string, null_token_id)
     """
     if null_token_config is None:
-        null_token_str = "<|reserved_special_token_3|>"
+        null_token_str = "<|reserved_special_token_11|>"
         null_token_id = tokenizer.convert_tokens_to_ids(null_token_str)
         if null_token_id is None or null_token_id < 0:
             # Fallback to a different reserved token
