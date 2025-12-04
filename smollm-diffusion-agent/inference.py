@@ -8,6 +8,7 @@ Implements the S3 (Schema Scaffolding) denoising loop with top-K remasking.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence
 
@@ -38,6 +39,7 @@ class GenerationConfig:
     topk_remask: Optional[int] = None
     use_fp16: bool = False
     clear_cache: bool = True
+    show_steps: bool = False
 
 
 @dataclass
@@ -114,6 +116,7 @@ class FunctionCallGenerator:
             sequence: torch.Tensor,
             prompt_mask: torch.Tensor,
             template: SchemaTemplate,
+            timestep: float,
             cfg_scale: float = 0.0,
     ) -> torch.Tensor:
         """Forward pass through the model."""
@@ -131,7 +134,12 @@ class FunctionCallGenerator:
             diffusion_head_dtype = next(self.model.diffusion_head.parameters()).dtype
             hidden_states = hidden_states.to(dtype=diffusion_head_dtype)
 
-        t = torch.zeros(sequence.shape[0], device=self.device)
+        # Convert timestep to tensor if needed
+        if isinstance(timestep, (int, float)):
+            t = torch.full((sequence.shape[0],), timestep, device=self.device, dtype=torch.float)
+        else:
+            t = timestep
+
         logits = self.model.diffusion_head.predict(
             hidden_states, sequence, t
         )
@@ -191,6 +199,13 @@ class FunctionCallGenerator:
             generation_trace: List[TraceStep] = []
             mask_positions = torch.zeros_like(sequence, dtype=torch.bool)
 
+            # Schedule timesteps from 1.0 (noisy) to 0.0 (clean)
+            # For 4 steps: [1.0, 0.67, 0.33, 0.0]
+            if cfg.steps == 1:
+                timesteps = [0.0]
+            else:
+                timesteps = [1.0 - (i / (cfg.steps - 1)) for i in range(cfg.steps)]
+
             for step in trange(cfg.steps, desc="Diffusion steps"):
                 mask_positions.fill_(False)
                 mask_positions[sequence == template.mask_token_id] = True
@@ -201,7 +216,9 @@ class FunctionCallGenerator:
                     executed_steps = step
                     break
 
-                logits = self._forward(sequence, prompt_mask, template, cfg.cfg_scale)
+                # Use scheduled timestep (starts at 1.0, decreases to near 0.0)
+                current_timestep = timesteps[step]
+                logits = self._forward(sequence, prompt_mask, template, current_timestep, cfg.cfg_scale)
                 logits = _apply_gumbel_noise(logits, cfg.temperature)
                 predictions = torch.argmax(logits, dim=-1)
 
@@ -228,6 +245,15 @@ class FunctionCallGenerator:
 
                 sequence[0, selected] = predictions[0, selected]
                 del predictions
+
+                if cfg.show_steps:
+                    response_tokens_step = sequence[0, prompt_length:].cpu()
+                    text_step = self.tokenizer.decode(
+                        response_tokens_step,
+                        skip_special_tokens=True,
+                        clean_up_tokenization_spaces=False,
+                    )
+                    print(f"Step {step + 1}/{cfg.steps}: {text_step}")
 
                 if trace:
                     generation_trace.append(
@@ -298,8 +324,65 @@ def demo_inference():
     print(f"Using mask token: {mask_token_str} (ID: {mask_token_id})")
     print(f"Tokenizer vocab size: {len(tokenizer)}")
 
-    # Initialize model with correct vocab size
-    model = HybridSmolLM(vocab_size=len(tokenizer))
+    # Check for checkpoint
+    model_cfg = config.get("model", {})
+    training_cfg = config.get("training", {})
+    diff_cfg = config.get("diffusion", {})
+    checkpoint_path = training_cfg.get("checkpoint_path", "checkpoints/best_model/model.pt")
+
+    # Initialize model with correct vocab size and config
+    model = HybridSmolLM(
+        base_model_id=model_cfg.get("base_model_id", "HuggingFaceTB/SmolLM3-3B"),
+        load_in_4bit=model_cfg.get("load_in_4bit", False),
+        diffusion_config=diff_cfg,
+        vocab_size=len(tokenizer)
+    )
+
+    # Load checkpoint if it exists
+    if os.path.exists(checkpoint_path):
+        print(f"Loading checkpoint from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        # Only load trainable heads (diffusion_head and router_head)
+        # Skip base_llm weights since they're frozen and loaded from pretrained model
+        checkpoint_state = checkpoint['model_state_dict']
+        model_state = model.state_dict()
+        
+        # Filter to only load trainable head weights
+        filtered_state = {}
+        skipped_keys = []
+        loaded_keys = []
+        
+        for key, value in checkpoint_state.items():
+            # Only load diffusion_head and router_head weights
+            if key.startswith('diffusion_head.') or key.startswith('router_head.'):
+                if key in model_state:
+                    # Check shape compatibility
+                    if model_state[key].shape == value.shape:
+                        filtered_state[key] = value
+                        loaded_keys.append(key)
+                    else:
+                        skipped_keys.append(f"{key} (shape mismatch: {model_state[key].shape} vs {value.shape})")
+                else:
+                    skipped_keys.append(f"{key} (not in model)")
+            else:
+                # Skip base_llm weights - they should come from pretrained model
+                skipped_keys.append(f"{key} (base_llm, skipped)")
+        
+        if filtered_state:
+            model.load_state_dict(filtered_state, strict=False)
+            print(f"Loaded {len(loaded_keys)} trainable head weights from checkpoint")
+            if skipped_keys:
+                print(f"Skipped {len(skipped_keys)} keys (base_llm or incompatible)")
+        else:
+            print("Warning: No compatible weights found in checkpoint, using untrained heads")
+        
+        if 'epoch' in checkpoint:
+            print(f"Checkpoint info: epoch {checkpoint['epoch']}, eval loss: {checkpoint.get('eval_loss', 'N/A')}")
+    else:
+        print(f"No checkpoint found at {checkpoint_path}, using untrained model")
+
+    # Move model to device and set eval mode
     model.to(device)
     model.eval()
     model.diffusion_head.set_mask_token_id(mask_token_id)
@@ -332,6 +415,7 @@ def demo_inference():
         steps=4,
         temperature=0.0,
         cfg_scale=0.0,
+        show_steps=True
     )
 
     output = generator.generate(
