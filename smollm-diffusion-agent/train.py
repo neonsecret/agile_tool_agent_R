@@ -162,6 +162,10 @@ def s3_denoise(model, hidden_states, labels, scaffold_mask, num_steps=4):
 
         if mask_indices.numel() == 0:
             break
+        
+        # Handle 0D tensor case (single mask position)
+        if mask_indices.dim() == 0:
+            mask_indices = mask_indices.unsqueeze(0)
 
         logits = model.diffusion_head.predict(hidden_states, current_tokens, t)
         predictions = torch.argmax(logits, dim=-1)
@@ -276,6 +280,7 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
             accelerator.print(f"Exact Match: {'✓' if exact_match else '✗'}")
 
     accelerator.print("\n" + "-" * 80)
+    torch.cuda.empty_cache()
     if total_tokens > 0:
         overall_token_acc = total_token_accuracy / total_tokens
         overall_exact_match = total_exact_matches / len(indices)
