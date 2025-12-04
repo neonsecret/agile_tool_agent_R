@@ -15,7 +15,8 @@ from .noise_schedule import LogLinearNoise
 
 
 class SchemaDiffusionHead(nn.Module):
-    def __init__(self, input_dim, vocab_size, hidden_dim=1024, num_layers=2, num_steps=4):
+    def __init__(self, input_dim, vocab_size, hidden_dim=1024, num_layers=2, num_steps=4,
+                 label_smoothing=0.1):
         """
         Args:
             input_dim: Dimension of hidden states from base model
@@ -23,11 +24,13 @@ class SchemaDiffusionHead(nn.Module):
             hidden_dim: Hidden dimension for diffusion head
             num_layers: Number of residual blocks
             num_steps: Number of diffusion steps for training
+            label_smoothing: Label smoothing factor (0.0 = no smoothing, 0.1 = 10% smoothing)
         """
         super().__init__()
         self.num_steps = num_steps
         self.hidden_dim = hidden_dim
         self.vocab_size = vocab_size
+        self.label_smoothing = label_smoothing
 
         self.noise = LogLinearNoise()
 
@@ -122,6 +125,7 @@ class SchemaDiffusionHead(nn.Module):
         Full training forward pass with diffusion loss.
 
         From mdlm diffusion.py _forward_pass_diffusion.
+        Uses label smoothing to reduce overconfidence and improve generalization.
 
         Args:
             tokens: [batch, seq_len] clean tokens (labels, may contain -100)
@@ -154,7 +158,13 @@ class SchemaDiffusionHead(nn.Module):
 
         active_logits = logits[valid_mask_positions]
         active_labels = tokens[valid_mask_positions]
-        loss = F.cross_entropy(active_logits, active_labels)
+        
+        # Apply label smoothing to reduce overconfidence
+        loss = F.cross_entropy(
+            active_logits, 
+            active_labels,
+            label_smoothing=self.label_smoothing
+        )
 
         return loss
 

@@ -3,7 +3,7 @@ import yaml
 from torch.utils.data import DataLoader, random_split
 from torch.nn.utils.rnn import pad_sequence
 from torch.optim import AdamW
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from tqdm.auto import tqdm
@@ -20,7 +20,7 @@ def load_config(config_path="config.yaml"):
         return yaml.safe_load(f)
 
 
-def load_checkpoint(checkpoint_path, model, optimizer, accelerator):
+def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
 
@@ -30,6 +30,11 @@ def load_checkpoint(checkpoint_path, model, optimizer, accelerator):
     unwrapped_model = accelerator.unwrap_model(model)
     unwrapped_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    # Load scheduler state if available
+    if 'scheduler_state_dict' in checkpoint and scheduler is not None:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        accelerator.print("Loaded scheduler state from checkpoint")
 
     start_epoch = checkpoint['epoch'] + 1
     best_eval_loss = checkpoint['eval_loss']
@@ -394,24 +399,45 @@ def train():
         params_to_optimize = list(model.diffusion_head.parameters())
 
     optimizer = AdamW(params_to_optimize, lr=float(training_cfg["learning_rate"]))
+    
+    # 5. Learning Rate Scheduler (Cosine with Warmup)
+    # From guide.md: warmup_steps=2500, cosine decay
+    num_epochs = training_cfg["num_epochs"]
+    gradient_accumulation_steps = training_cfg["gradient_accumulation_steps"]
+    num_update_steps_per_epoch = len(train_dataloader) // gradient_accumulation_steps
+    total_training_steps = num_epochs * num_update_steps_per_epoch
+    
+    warmup_steps = training_cfg.get("warmup_steps", 2500)
+    # Cap warmup to 10% of total steps if total steps is smaller
+    warmup_steps = min(warmup_steps, int(0.1 * total_training_steps))
+    
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_training_steps
+    )
+    
+    accelerator.print(f"LR Scheduler: Cosine with warmup")
+    accelerator.print(f"  Total training steps: {total_training_steps}")
+    accelerator.print(f"  Warmup steps: {warmup_steps}")
 
-    # 5. Prepare
-    model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader
+    # 6. Prepare
+    model, optimizer, train_dataloader, eval_dataloader, scheduler = accelerator.prepare(
+        model, optimizer, train_dataloader, eval_dataloader, scheduler
     )
 
-    # 6. Load checkpoint if resuming
+    # 7. Load checkpoint if resuming
     start_epoch = 0
     best_eval_loss = float('inf')
     global_step = 0
 
     if training_cfg.get("resume_from_checkpoint", False):
         checkpoint_path = training_cfg.get("checkpoint_path", "checkpoints/best_model/model.pt")
-        start_epoch, best_eval_loss = load_checkpoint(checkpoint_path, model, optimizer, accelerator)
+        start_epoch, best_eval_loss = load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator)
         global_step = start_epoch * len(train_dataloader)
         accelerator.print(f"Starting from epoch {start_epoch}, global step {global_step}")
 
-    # 7. Training Loop
+    # 8. Training Loop
     accelerator.print("Starting training loop...")
     model.train()
 
@@ -475,8 +501,14 @@ def train():
                     accelerator.clip_grad_norm_(params_to_optimize, 1.0)
 
                 optimizer.step()
+                scheduler.step()  # Step LR scheduler
                 optimizer.zero_grad()
                 global_step += 1
+                
+                # Log learning rate
+                if global_step % 100 == 0:
+                    current_lr = scheduler.get_last_lr()[0]
+                    accelerator.log({"train/learning_rate": current_lr}, step=global_step)
 
             # Step-based functional evaluation
             eval_every_n_steps = training_cfg.get("eval_every_n_steps", 1000)
@@ -558,6 +590,7 @@ def train():
                     'epoch': epoch,
                     'model_state_dict': unwrapped_model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
                     'eval_loss': best_eval_loss,
                     'config': config
                 }, f"{save_dir}/model.pt")

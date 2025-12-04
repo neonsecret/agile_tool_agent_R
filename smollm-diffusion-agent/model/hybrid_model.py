@@ -60,13 +60,15 @@ class HybridSmolLM(nn.Module):
         hidden_dim = diffusion_config.get("hidden_dim", 1024)
         num_layers = diffusion_config.get("num_layers", 2)
         num_steps = diffusion_config.get("num_steps", 4)
+        label_smoothing = diffusion_config.get("label_smoothing", 0.1)
 
         self.diffusion_head = SchemaDiffusionHead(
             input_dim=hidden_size,
             vocab_size=vocab_size,
             hidden_dim=hidden_dim,
             num_layers=num_layers,
-            num_steps=num_steps
+            num_steps=num_steps,
+            label_smoothing=label_smoothing
         )
         self.router_head = RouterHead(hidden_size, num_classes=2)
 
