@@ -9,15 +9,15 @@ from transformers import AutoTokenizer
 
 try:
     from .schema import build_schema_template
-    from .utils import resolve_mask_token
+    from .utils import resolve_mask_token, resolve_null_token
 except:
     from schema import build_schema_template
-    from utils import resolve_mask_token
+    from utils import resolve_mask_token, resolve_null_token
 
 
 class SmartScaffoldDataset(Dataset):
     def __init__(self, tokenizer, split="train", max_seq_len=1024, max_new_tokens=256, limit=None,
-                 mask_token=None, chat_sampling_rate=0.1, mask_budget=48):
+                 mask_token=None, null_token=None, chat_sampling_rate=0.1, mask_budget=48):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.max_new_tokens = max_new_tokens
@@ -34,6 +34,12 @@ class SmartScaffoldDataset(Dataset):
             )
 
         self.mask_token, self.mask_token_id = resolve_mask_token(tokenizer, mask_token)
+        
+        # NULL token for self-adaptive masking (variable-length fields)
+        self.null_token = None
+        self.null_token_id = None
+        if null_token is not None:
+            self.null_token, self.null_token_id = resolve_null_token(tokenizer, null_token)
 
         # Load dataset
         self.ds = load_dataset("interstellarninja/hermes_reasoning_tool_use", split=split)
@@ -154,11 +160,12 @@ class SmartScaffoldDataset(Dataset):
         if not fields:
             return
 
-        # Build Template
+        # Build Template with optional NULL token support
         template = build_schema_template(
             self.tokenizer,
             fields,
             self.mask_token,
+            null_token=self.null_token,
             include_codeblock=False
         )
 
@@ -220,7 +227,12 @@ class SmartScaffoldDataset(Dataset):
                 if i < len(tgt):
                     labels[global_pos] = tgt[i]
                 else:
-                    labels[global_pos] = -100
+                    # Use NULL token for unused slots (enables automatic budget handling)
+                    # Model learns to predict NULL for positions beyond actual content
+                    if self.null_token_id is not None:
+                        labels[global_pos] = self.null_token_id
+                    else:
+                        labels[global_pos] = -100  # Fallback to ignore
 
         scaffold_mask.extend(template_mask)
 

@@ -12,7 +12,7 @@ import wandb
 
 from model.hybrid_model import HybridSmolLM
 from data.dataset_loader import SmartScaffoldDataset
-from data.utils import resolve_mask_token, validate_mask_token_consistency
+from data.utils import resolve_mask_token, resolve_null_token, validate_mask_token_consistency
 
 
 def load_config(config_path="config.yaml"):
@@ -254,22 +254,35 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
             true_tokens_valid = true_tokens[valid_mask]
             pred_tokens_valid = pred_tokens[valid_mask]
 
-            if len(true_tokens_valid) == 0:
+            # Strip NULL tokens from both true and predicted (for self-adaptive masking)
+            null_token_id = unwrapped_model.diffusion_head.null_token_id
+            if null_token_id is not None:
+                # Remove NULL tokens from true tokens (they're padding for variable-length fields)
+                true_tokens_valid = true_tokens_valid[true_tokens_valid != null_token_id]
+                # Remove NULL tokens from predictions (model may predict NULL for unused slots)
+                pred_tokens_valid = pred_tokens_valid[pred_tokens_valid != null_token_id]
+            
+            # Align lengths: compare only up to minimum length (handles variable-length fields)
+            min_len = min(len(true_tokens_valid), len(pred_tokens_valid))
+            if min_len == 0:
                 continue
+            
+            true_tokens_aligned = true_tokens_valid[:min_len]
+            pred_tokens_aligned = pred_tokens_valid[:min_len]
 
-            correct_tokens = (true_tokens_valid == pred_tokens_valid).sum().item()
-            num_tokens = len(true_tokens_valid)
+            correct_tokens = (true_tokens_aligned == pred_tokens_aligned).sum().item()
+            num_tokens = min_len
             token_accuracy = correct_tokens / num_tokens if num_tokens > 0 else 0
 
             total_token_accuracy += correct_tokens
             total_tokens += num_tokens
 
-            exact_match = torch.all(true_tokens_valid == pred_tokens_valid).item()
+            exact_match = torch.all(true_tokens_aligned == pred_tokens_aligned).item()
             total_exact_matches += exact_match
 
             # Convert to list of integers for tokenizer.decode
-            true_tokens_list = true_tokens_valid.tolist()
-            pred_tokens_list = pred_tokens_valid.tolist()
+            true_tokens_list = true_tokens_aligned.tolist()
+            pred_tokens_list = pred_tokens_aligned.tolist()
 
             true_masked_text = tokenizer.decode(true_tokens_list, skip_special_tokens=False)
             pred_masked_text = tokenizer.decode(pred_tokens_list, skip_special_tokens=False)
@@ -337,6 +350,17 @@ def train():
     # Resolve mask token from config
     mask_token_config = data_cfg.get("mask_token", None)
     mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
+    
+    # Resolve NULL token for self-adaptive masking (variable-length fields)
+    null_token_config = data_cfg.get("null_token", None)
+    null_token_str, null_token_id = None, None
+    if null_token_config is not None or data_cfg.get("use_null_token", True):
+        try:
+            null_token_str, null_token_id = resolve_null_token(tokenizer, null_token_config)
+            accelerator.print(f"NULL token: {null_token_str} (ID: {null_token_id})")
+        except ValueError as e:
+            accelerator.print(f"Warning: NULL token not available: {e}")
+            null_token_str, null_token_id = None, None
 
     accelerator.print(f"Mask token: {mask_token_str} (ID: {mask_token_id})")
     accelerator.print(f"Tokenizer vocabulary size: {len(tokenizer)}")
@@ -352,16 +376,21 @@ def train():
 
     # Set mask token ID in diffusion head for proper noising
     model.diffusion_head.set_mask_token_id(mask_token_id)
+    
+    # Set NULL token ID for self-adaptive masking
+    if null_token_id is not None:
+        model.diffusion_head.set_null_token_id(null_token_id)
 
     # 4. Setup Dataset
     accelerator.print("Loading Dataset...")
-    # Load full dataset
+    # Load full dataset with NULL token support for automatic budgeting
     full_dataset = SmartScaffoldDataset(
         tokenizer,
         limit=data_cfg["limit"],
         max_seq_len=training_cfg["max_seq_len"],
         max_new_tokens=training_cfg["max_new_tokens"],
         mask_token=mask_token_str,
+        null_token=null_token_str,  # Enables self-adaptive masking
         chat_sampling_rate=data_cfg.get("chat_sampling_rate", 0.1),
         mask_budget=data_cfg.get("mask_budget", 48)
     )

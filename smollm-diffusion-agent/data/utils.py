@@ -43,6 +43,46 @@ def resolve_mask_token(tokenizer: PreTrainedTokenizerBase, mask_token_config=Non
     return mask_token_str, mask_token_id
 
 
+def resolve_null_token(tokenizer: PreTrainedTokenizerBase, null_token_config=None):
+    """
+    Resolve NULL token for self-adaptive masking (variable-length fields).
+    
+    Uses <|reserved_special_token_3|> as default.
+    The NULL token indicates "unused slot" in the scaffold - model learns to
+    predict NULL for positions beyond the actual content length.
+    
+    Args:
+        tokenizer: Tokenizer instance
+        null_token_config: Config value (None or string)
+            - None: Use <|reserved_special_token_3|> (default)
+            - string: Use specified token string
+        
+    Returns:
+        tuple: (null_token_string, null_token_id)
+    """
+    if null_token_config is None:
+        null_token_str = "<|reserved_special_token_3|>"
+        null_token_id = tokenizer.convert_tokens_to_ids(null_token_str)
+        if null_token_id is None or null_token_id < 0:
+            # Fallback to a different reserved token
+            null_token_str = "<|reserved_special_token_4|>"
+            null_token_id = tokenizer.convert_tokens_to_ids(null_token_str)
+            if null_token_id is None or null_token_id < 0:
+                raise ValueError(
+                    "Could not find a suitable NULL token in the tokenizer vocabulary. "
+                    "Please specify a valid token in the config."
+                )
+    else:
+        null_token_str = null_token_config
+        null_token_id = tokenizer.convert_tokens_to_ids(null_token_str)
+        if null_token_id is None or null_token_id < 0:
+            raise ValueError(
+                f"NULL token '{null_token_str}' not found in tokenizer vocabulary."
+            )
+    
+    return null_token_str, null_token_id
+
+
 def validate_mask_token_consistency(model_mask_token_id, template_mask_token_id, context=""):
     """
     Validate that mask token IDs match between model and template.

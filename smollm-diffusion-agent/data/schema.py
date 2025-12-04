@@ -6,12 +6,17 @@ The schema scaffolding technique described in the paper pre-populates the
 generation context with structural tokens (e.g., JSON braces and field
 names) while reserving mask tokens for variable content.  This module
 encapsulates the bookkeeping required to track mask positions per field.
+
+Enhanced with NULL token support for self-adaptive masking:
+- Allocate a fixed budget per field
+- Fill with MASK tokens initially
+- Model learns to predict NULL for unused slots (variable-length handling)
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from transformers import PreTrainedTokenizerBase
 
@@ -35,6 +40,8 @@ class SchemaTemplate:
     """
     Encapsulates the tokenised scaffold ready to be injected into the
     diffusion generation process.
+    
+    Supports NULL tokens for self-adaptive masking (variable-length fields).
     """
 
     tokens: Tuple[int, ...]
@@ -42,6 +49,8 @@ class SchemaTemplate:
     text: str
     mask_token_id: int
     mask_token: str
+    null_token_id: Optional[int] = None
+    null_token: Optional[str] = None
 
     def num_variable_tokens(self) -> int:
         return sum(segment.length for segment in self.field_segments)
@@ -65,16 +74,23 @@ def build_schema_template(
     tokenizer: PreTrainedTokenizerBase,
     fields: Sequence[Tuple[str, int]],
     mask_token: str,
+    null_token: Optional[str] = None,
     include_codeblock: bool = True,
     indent: str = "  ",
 ) -> SchemaTemplate:
     """
     Construct a schema template for the provided fields.
+    
+    Supports NULL tokens for self-adaptive masking (variable-length fields):
+    - All budget positions are filled with MASK tokens initially
+    - During training, model learns to predict NULL for unused slots
+    - During inference, NULL tokens are stripped from output
 
     Args:
         tokenizer: Tokenizer used by the diffusion LLM.
         fields: Iterable of (field_name, token_budget) pairs.
         mask_token: Mask token string recognised by the model.
+        null_token: Optional NULL token for variable-length fields.
         include_codeblock: Whether to wrap the template in ```json fences.
         indent: String used for indentation.
 
@@ -85,6 +101,12 @@ def build_schema_template(
     mask_token_id = tokenizer.convert_tokens_to_ids(mask_token)
     if mask_token_id is None or mask_token_id < 0:
         raise ValueError(f"Mask token '{mask_token}' is not in the tokenizer vocabulary.")
+    
+    null_token_id = None
+    if null_token is not None:
+        null_token_id = tokenizer.convert_tokens_to_ids(null_token)
+        if null_token_id is None or null_token_id < 0:
+            raise ValueError(f"NULL token '{null_token}' is not in the tokenizer vocabulary.")
 
     tokens: List[int] = []
     text_parts: List[str] = []
@@ -104,6 +126,7 @@ def build_schema_template(
         start_index = len(tokens)
         value_positions: List[int] = []
 
+        # All positions get MASK token - model predicts actual value or NULL
         for _ in range(budget):
             value_positions.append(len(tokens))
             tokens.append(mask_token_id)
@@ -134,4 +157,6 @@ def build_schema_template(
         text=template_text,
         mask_token_id=mask_token_id,
         mask_token=mask_token,
+        null_token_id=null_token_id,
+        null_token=null_token,
     )

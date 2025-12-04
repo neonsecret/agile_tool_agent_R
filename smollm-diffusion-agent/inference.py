@@ -26,7 +26,7 @@ import yaml
 
 from model.hybrid_model import HybridSmolLM
 from data.schema import SchemaTemplate, build_schema_template
-from data.utils import resolve_mask_token, validate_mask_token_consistency
+from data.utils import resolve_mask_token, resolve_null_token, validate_mask_token_consistency
 
 
 def load_config(config_path="config.yaml"):
@@ -220,6 +220,25 @@ class FunctionCallGenerator:
         self._cuda_graph = None
         self._graph_inputs = {}
         self._graph_outputs = None
+    
+    def _strip_null_tokens(self, tokens: torch.Tensor, null_token_id: Optional[int]) -> torch.Tensor:
+        """Strip NULL tokens from output for variable-length field handling.
+        
+        During generation, the model may predict NULL tokens for unused slots.
+        These should be removed before decoding to get clean output.
+        
+        Args:
+            tokens: 1D tensor of token IDs (already on CPU)
+            null_token_id: NULL token ID to filter out, or None to skip filtering
+        
+        Returns:
+            Filtered tensor with NULL tokens removed
+        """
+        if null_token_id is None:
+            return tokens
+        # Filter out NULL tokens - works on CPU tensors
+        mask = tokens != null_token_id
+        return tokens[mask]
 
     def _build_messages(self, prompt: str) -> List[Dict[str, str]]:
         """Build chat template messages."""
@@ -498,6 +517,10 @@ class FunctionCallGenerator:
                 executed_steps = cfg.steps
 
             response_tokens = sequence[0, prompt_length:].cpu()
+            
+            # Strip NULL tokens for clean output (self-adaptive masking)
+            null_token_id = template.null_token_id
+            response_tokens_clean = self._strip_null_tokens(response_tokens, null_token_id)
 
             if trace:
                 for trace_step in generation_trace:
@@ -511,7 +534,7 @@ class FunctionCallGenerator:
                     ]
 
             text = self.tokenizer.decode(
-                response_tokens,
+                response_tokens_clean,
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=False,
             )
@@ -528,7 +551,7 @@ class FunctionCallGenerator:
 
         return GenerationOutput(
             text=text,
-            token_ids=response_tokens.tolist(),
+            token_ids=response_tokens_clean.tolist(),  # Use cleaned tokens (NULL tokens removed)
             steps_executed=executed_steps,
             trace=generation_trace,
         )
@@ -552,6 +575,16 @@ def demo_inference():
     data_cfg = config.get("data", {})
     mask_token_config = data_cfg.get("mask_token", None)
     mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
+    
+    # Resolve NULL token for self-adaptive masking
+    null_token_config = data_cfg.get("null_token", None)
+    null_token_str, null_token_id = None, None
+    try:
+        null_token_str, null_token_id = resolve_null_token(tokenizer, null_token_config)
+        print(f"Using NULL token: {null_token_str} (ID: {null_token_id})")
+    except ValueError as e:
+        print(f"Warning: NULL token not available: {e}")
+        null_token_str, null_token_id = None, None
 
     print(f"Using mask token: {mask_token_str} (ID: {mask_token_id})")
     print(f"Tokenizer vocab size: {len(tokenizer)}")
@@ -618,6 +651,10 @@ def demo_inference():
     model.to(device)
     model.eval()
     model.diffusion_head.set_mask_token_id(mask_token_id)
+    
+    # Set NULL token ID if available
+    if null_token_id is not None:
+        model.diffusion_head.set_null_token_id(null_token_id)
 
     # Initialize generator with optimizations
     # Enable torch.compile for CUDA or MPS (if PyTorch 2.1+)
@@ -648,6 +685,7 @@ def demo_inference():
         tokenizer=tokenizer,
         fields=fields,
         mask_token=mask_token_str,
+        null_token=null_token_str,
         include_codeblock=False
     )
     
