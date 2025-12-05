@@ -514,8 +514,9 @@ def train():
         print("Quantization: disabled")
         quantize_bits = None
 
+    base_model_id = model_cfg.get("mlx_base_model_id", model_cfg["base_model_id"])
     model = HybridSmolLMMLX(
-        base_model_id=model_cfg["base_model_id"],
+        base_model_id=base_model_id,
         quantize_bits=quantize_bits,
         diffusion_config=diff_cfg,
         vocab_size=model_cfg.get("vocab_size"),

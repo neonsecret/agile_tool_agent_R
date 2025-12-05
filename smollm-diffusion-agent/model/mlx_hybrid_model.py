@@ -467,6 +467,8 @@ class HybridSmolLMMLX(nn.Module):
         else:
             self.base_model, self.tokenizer = load(base_model_id)
 
+        self._log_base_model_dtype()
+
         # Get model configuration
         # mlx_lm models store config in model.args or model.config
         model_args = self._get_model_args()
@@ -504,6 +506,16 @@ class HybridSmolLMMLX(nn.Module):
 
         # Note: Keep heads in float32 for now - bfloat16 can cause NaN issues in MLX
         # self._cast_heads_to_dtype(mx.bfloat16)
+
+    def _log_base_model_dtype(self):
+        """Log a sample parameter dtype/shape to confirm quantized vs full precision load."""
+        try:
+            params = self.base_model.parameters()
+            if isinstance(params, dict) and params:
+                name, param = next(iter(params.items()))
+                print(f"Base model param sample: {name}, dtype={getattr(param, 'dtype', None)}, shape={getattr(param, 'shape', None)}")
+        except Exception as e:
+            print(f"Could not inspect base model parameters: {e}")
 
     def _cast_heads_to_dtype(self, dtype=mx.bfloat16):
         """Cast trainable heads to specified dtype (default bfloat16 to match PyTorch)."""

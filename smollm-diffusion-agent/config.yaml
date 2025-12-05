@@ -1,6 +1,7 @@
 # Model Configuration
 model:
   base_model_id: "HuggingFaceTB/SmolLM3-3B"
+  mlx_base_model_id: "mlx-community/SmolLM3-3B-4bit"
   hidden_size: 2048 # Will be auto-detected but good to have default
   vocab_size: 32000
   backend: "pytorch"  # "pytorch" or "mlx"
@@ -27,10 +28,10 @@ diffusion:
 
 # Training Configuration
 training:
-  batch_size: 1
+  batch_size: 3
   learning_rate: 1.0e-4
   num_epochs: 4
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   train_router: false
   max_seq_len: 2048  # Increased from 1024: median=1198, 90th percentile=2278
   max_new_tokens: 256
