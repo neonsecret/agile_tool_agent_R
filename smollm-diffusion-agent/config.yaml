@@ -39,7 +39,7 @@ training:
   wandb_project: "smollm-diffusion-agent"
   resume_from_checkpoint: false
   checkpoint_path: "checkpoints/best_model/model.pt"
-  eval_every_n_steps: 1000  # Run functional evaluation every N steps
+  eval_every_n_steps: 2  # Run functional evaluation every N steps
   eval_num_samples: 10  # Number of samples to evaluate on
   warmup_steps: 2500  # LR warmup steps (from guide.md), capped at 10% of total steps
   # Distributed training (MLX only)
