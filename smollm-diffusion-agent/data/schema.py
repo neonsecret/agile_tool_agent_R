@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
+import torch
 from transformers import PreTrainedTokenizerBase
 
 
@@ -56,8 +57,6 @@ class SchemaTemplate:
         return sum(segment.length for segment in self.field_segments)
 
     def to_tensor(self, device) -> "torch.Tensor":
-        import torch
-
         return torch.tensor(self.tokens, dtype=torch.long, device=device)
 
 

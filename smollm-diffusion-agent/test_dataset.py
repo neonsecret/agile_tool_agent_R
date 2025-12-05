@@ -12,6 +12,7 @@ from transformers import AutoTokenizer
 
 # Use same import style as train.py
 from data.dataset_loader import SmartScaffoldDataset
+from data.device_utils import get_device
 from data.utils import resolve_mask_token
 from model.hybrid_model import HybridSmolLM
 from model.diffusion_head import SchemaDiffusionHead
@@ -520,7 +521,6 @@ def main():
     print("Loading Model for Debugging...")
     print("=" * 80)
     
-    from data.device_utils import get_device
     device = get_device()
     print(f"Using device: {device}")
     

@@ -1,9 +1,20 @@
 # Model Configuration
 model:
   base_model_id: "HuggingFaceTB/SmolLM3-3B"
-  load_in_4bit: true
   hidden_size: 2048 # Will be auto-detected but good to have default
   vocab_size: 32000
+  backend: "pytorch"  # "pytorch" or "mlx"
+
+# Quantization Configuration (independent of backend)
+# This setting applies to both PyTorch and MLX backends
+quantization:
+  enabled: true  # Enable quantization (works for both PyTorch and MLX)
+  bits: 4  # Quantization bits: 4 or 8
+  # Backend-specific behavior:
+  #   - PyTorch: Only 4-bit supported (via bitsandbytes, CUDA only)
+  #              If bits != 4 or not on CUDA, falls back to bfloat16
+  #   - MLX: Supports 4-bit and 8-bit natively on Apple Silicon
+  #          If enabled: false, loads full precision model
 
 # Diffusion Head Configuration
 diffusion:
@@ -16,10 +27,10 @@ diffusion:
 
 # Training Configuration
 training:
-  batch_size: 6
+  batch_size: 1
   learning_rate: 1.0e-4
   num_epochs: 4
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   train_router: false
   max_seq_len: 2048  # Increased from 1024: median=1198, 90th percentile=2278
   max_new_tokens: 256
@@ -31,6 +42,13 @@ training:
   eval_every_n_steps: 1000  # Run functional evaluation every N steps
   eval_num_samples: 10  # Number of samples to evaluate on
   warmup_steps: 2500  # LR warmup steps (from guide.md), capped at 10% of total steps
+  # Distributed training (MLX only)
+  distributed:
+    enabled: false
+    num_machines: 1
+    num_processes_per_machine: 1
+    backend: "ring"  # "ring" or "mpi"
+    main_process_port: 29500
 
 # Data Configuration
 data:

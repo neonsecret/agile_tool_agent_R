@@ -4,6 +4,7 @@ from datasets import load_dataset
 import json
 import re
 import random
+import yaml
 
 from transformers import AutoTokenizer
 
@@ -280,9 +281,6 @@ class SmartScaffoldDataset(Dataset):
 
 
 if __name__ == '__main__':
-    import yaml
-
-
     def load_config(config_path="../config.yaml"):
         with open(config_path, "r") as f:
             return yaml.safe_load(f)

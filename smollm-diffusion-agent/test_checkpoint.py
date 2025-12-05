@@ -1,9 +1,11 @@
 import torch
 import yaml
+import argparse
 from transformers import AutoTokenizer
 from model.hybrid_model import HybridSmolLM
 from data.dataset_loader import SmartScaffoldDataset
 from data.device_utils import get_device
+from data.utils import resolve_mask_token
 import os
 
 
@@ -54,8 +56,6 @@ def test_model(num_samples=5):
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    from data.utils import resolve_mask_token
     
     mask_token_config = data_cfg.get("mask_token", None)
     mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
@@ -150,8 +150,6 @@ def test_model(num_samples=5):
 
 
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser(description="Test model checkpoint on dataset samples")
     parser.add_argument("--num_samples", type=int, default=10, help="Number of samples to test")
     args = parser.parse_args()

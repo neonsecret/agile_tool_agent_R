@@ -1,5 +1,6 @@
 import torch
 import yaml
+import random
 from torch.utils.data import DataLoader, random_split
 from torch.nn.utils.rnn import pad_sequence
 from torch.optim import AdamW
@@ -208,7 +209,6 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
     accelerator.print("FUNCTIONAL EVALUATION - S3 Denoising Strategy")
     accelerator.print("=" * 80)
 
-    import random
     indices = random.sample(range(len(eval_dataset)), min(num_examples, len(eval_dataset)))
 
     total_exact_matches = 0
@@ -323,6 +323,7 @@ def train():
     model_cfg = config["model"]
     data_cfg = config["data"]
     diff_cfg = config["diffusion"]
+    quant_cfg = config.get("quantization", {})
 
     # 1. Initialize Accelerator with W&B
     accelerator = Accelerator(
@@ -366,10 +367,26 @@ def train():
     accelerator.print(f"Tokenizer vocabulary size: {len(tokenizer)}")
 
     # 3. Initialize Model with correct vocab size
+    # Determine quantization setting from unified config
+    quantize_enabled = quant_cfg.get("enabled", False)
+    quantize_bits = quant_cfg.get("bits", 4)
+    
+    # For PyTorch, only 4-bit quantization is supported (and only on CUDA)
+    load_in_4bit = quantize_enabled and quantize_bits == 4
+    
+    if quantize_enabled:
+        if quantize_bits == 4:
+            accelerator.print(f"Quantization: 4-bit (PyTorch bitsandbytes - CUDA only)")
+        else:
+            accelerator.print(f"Quantization: {quantize_bits}-bit not supported in PyTorch, using bfloat16 instead")
+            load_in_4bit = False
+    else:
+        accelerator.print("Quantization: disabled")
+    
     accelerator.print("Loading Model...")
     model = HybridSmolLM(
         base_model_id=model_cfg["base_model_id"],
-        load_in_4bit=model_cfg["load_in_4bit"],
+        load_in_4bit=load_in_4bit,
         diffusion_config=diff_cfg,
         vocab_size=len(tokenizer)  # Use tokenizer vocab size!
     )
