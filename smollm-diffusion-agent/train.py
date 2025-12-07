@@ -324,6 +324,7 @@ def train():
     data_cfg = config["data"]
     diff_cfg = config["diffusion"]
     quant_cfg = config.get("quantization", {})
+    compile_cfg = training_cfg.get("compile", {})
 
     # 1. Initialize Accelerator with W&B
     accelerator = Accelerator(
@@ -397,6 +398,21 @@ def train():
     # Set NULL token ID for self-adaptive masking
     if null_token_id is not None:
         model.diffusion_head.set_null_token_id(null_token_id)
+
+    # Optional: torch.compile for training (compile the full model before prepare)
+    if compile_cfg.get("enabled", False) and hasattr(torch, "compile"):
+        compile_mode = compile_cfg.get("mode", "reduce-overhead")
+        compile_fullgraph = compile_cfg.get("fullgraph", False)
+        accelerator.print(f"torch.compile enabled for training (mode={compile_mode}, fullgraph={compile_fullgraph})")
+        accelerator.print("Note: for best stability, pad/bucket sequences to fixed lengths per batch.")
+        try:
+            model = torch.compile(
+                model,
+                mode=compile_mode,
+                fullgraph=compile_fullgraph
+            )
+        except Exception as e:
+            accelerator.print(f"torch.compile failed, falling back to eager: {e}")
 
     # 4. Setup Dataset
     accelerator.print("Loading Dataset...")
