@@ -65,7 +65,7 @@ class GenerationConfig:
     clear_cache: bool = True
     show_steps: bool = False
     use_kv_cache: bool = True
-    use_cuda_graph: bool = False
+    use_cuda_graph: bool = True
 
 
 @dataclass
@@ -111,8 +111,8 @@ class FunctionCallGenerator:
             model: HybridSmolLM,
             tokenizer: AutoTokenizer,
             device: torch.device,
-            use_torch_compile: bool = False,
-            use_cuda_graph: bool = False,
+            use_torch_compile: bool = True,
+            use_cuda_graph: bool = True,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -337,7 +337,7 @@ class FunctionCallGenerator:
             cfg_scale: float = 0.0,
             prompt_length: int = 0,
             use_kv_cache: bool = True,
-            use_cuda_graph: bool = False,
+            use_cuda_graph: bool = True,
     ) -> torch.Tensor:
         """Forward pass through the model with optimizations."""
         with torch.no_grad():
@@ -571,6 +571,15 @@ def demo_inference():
     config = load_config()
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM3-3B")
 
+    # Inference config
+    inference_cfg = config.get("inference", {})
+    use_kv_cache = inference_cfg.get("use_kv_cache", True)
+    use_torch_compile = inference_cfg.get("use_torch_compile", device.type == "cuda")
+    use_cuda_graph = inference_cfg.get("use_cuda_graph", True)
+    steps = inference_cfg.get("steps", 4)
+    temperature = inference_cfg.get("temperature", 0.0)
+    cfg_scale = inference_cfg.get("cfg_scale", 0.0)
+
     # Resolve mask token
     data_cfg = config.get("data", {})
     mask_token_config = data_cfg.get("mask_token", None)
@@ -656,14 +665,7 @@ def demo_inference():
     if null_token_id is not None:
         model.diffusion_head.set_null_token_id(null_token_id)
 
-    # Initialize generator with optimizations
-    # Enable torch.compile for CUDA or MPS (if PyTorch 2.1+)
-    use_torch_compile = (
-        device.type == "cuda" or 
-        (device.type == "mps" and _can_use_torch_compile_mps(device))
-    )
-    use_cuda_graph = False  # Disabled by default, can enable for benchmarking
-    
+    # Initialize generator with optimizations (from config + device defaults)
     generator = FunctionCallGenerator(
         model, 
         tokenizer, 
@@ -672,7 +674,7 @@ def demo_inference():
         use_cuda_graph=use_cuda_graph
     )
     
-    print(f"Optimizations: torch.compile={use_torch_compile}, cuda_graph={use_cuda_graph}")
+    print(f"Optimizations: torch.compile={use_torch_compile}, cuda_graph={use_cuda_graph}, kv_cache={use_kv_cache}")
 
     prompt = "What's the weather in London?"
 
@@ -698,11 +700,11 @@ def demo_inference():
     print(f"Scaffold template: {template.text}")
 
     config = GenerationConfig(
-        steps=4,
-        temperature=0.0,
-        cfg_scale=0.0,
+        steps=steps,
+        temperature=temperature,
+        cfg_scale=cfg_scale,
         show_steps=True,
-        use_kv_cache=True,
+        use_kv_cache=use_kv_cache,
         use_cuda_graph=use_cuda_graph
     )
 
