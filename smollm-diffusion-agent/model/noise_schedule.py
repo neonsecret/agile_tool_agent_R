@@ -17,6 +17,7 @@ class LogLinearNoise(nn.Module):
     -log(1 - (1 - eps) * t), so the sigma will be
     (1 - eps) * t.
     """
+
     def __init__(self, eps=1e-3):
         super().__init__()
         self.eps = eps
