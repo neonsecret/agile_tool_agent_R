@@ -427,16 +427,11 @@ def train():
         compile_mode = compile_cfg.get("mode", "reduce-overhead")
         compile_fullgraph = compile_cfg.get("fullgraph", False)
         
-        # If reduce-overhead mode is used, it enables CUDA graphs by default
-        # For training with variable shapes (bucketing), use "default" or disable CUDA graphs explicitly
-        if compile_mode == "reduce-overhead":
-            accelerator.print("Warning: reduce-overhead mode enables CUDA graphs which can cause issues with variable batch shapes.")
-            accelerator.print("Consider using mode='default' or mode='max-autotune-no-cudagraphs' for training.")
-        
         accelerator.print(f"torch.compile enabled for training (mode={compile_mode}, fullgraph={compile_fullgraph})")
         accelerator.print("Note: for best stability, pad/bucket sequences to fixed lengths per batch.")
         try:
             # Disable CUDA graphs to avoid tensor reuse issues during training
+            # Note: reduce-overhead mode enables CUDA graphs by default, but we disable them here
             import torch._inductor.config as inductor_config
             inductor_config.triton.cudagraphs = False
             inductor_config.triton.cudagraph_trees = False
@@ -445,8 +440,7 @@ def train():
             model = torch.compile(
                 model,
                 mode=compile_mode,
-                fullgraph=compile_fullgraph,
-                options={"triton.cudagraphs": False}
+                fullgraph=compile_fullgraph
             )
         except Exception as e:
             accelerator.print(f"torch.compile failed, falling back to eager: {e}")
