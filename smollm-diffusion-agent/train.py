@@ -426,22 +426,27 @@ def train():
     if compile_cfg.get("enabled", False) and hasattr(torch, "compile"):
         compile_mode = compile_cfg.get("mode", "reduce-overhead")
         compile_fullgraph = compile_cfg.get("fullgraph", False)
+        
+        # If reduce-overhead mode is used, it enables CUDA graphs by default
+        # For training with variable shapes (bucketing), use "default" or disable CUDA graphs explicitly
+        if compile_mode == "reduce-overhead":
+            accelerator.print("Warning: reduce-overhead mode enables CUDA graphs which can cause issues with variable batch shapes.")
+            accelerator.print("Consider using mode='default' or mode='max-autotune-no-cudagraphs' for training.")
+        
         accelerator.print(f"torch.compile enabled for training (mode={compile_mode}, fullgraph={compile_fullgraph})")
         accelerator.print("Note: for best stability, pad/bucket sequences to fixed lengths per batch.")
         try:
-            # Disable CUDA graphs during training compile to avoid CUDAGraph reuse issues
-            try:
-                import torch._inductor.config as inductor_config  # type: ignore
-                inductor_config.triton.cudagraphs = False
-                inductor_config.cpp.cudagraphs = False
-                accelerator.print("Inductor CUDA graphs disabled for training compile.")
-            except Exception as e:  # pragma: no cover - best-effort
-                accelerator.print(f"Warning: could not disable inductor cudagraphs: {e}")
+            # Disable CUDA graphs to avoid tensor reuse issues during training
+            import torch._inductor.config as inductor_config
+            inductor_config.triton.cudagraphs = False
+            inductor_config.triton.cudagraph_trees = False
+            accelerator.print("Inductor CUDA graphs disabled for training.")
 
             model = torch.compile(
                 model,
                 mode=compile_mode,
-                fullgraph=compile_fullgraph
+                fullgraph=compile_fullgraph,
+                options={"triton.cudagraphs": False}
             )
         except Exception as e:
             accelerator.print(f"torch.compile failed, falling back to eager: {e}")
@@ -549,6 +554,10 @@ def train():
         )
 
         for batch in progress_bar:
+            # Mark CUDA graph step boundary to prevent tensor reuse issues
+            if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
+                torch.compiler.cudagraph_mark_step_begin()
+
             with accelerator.accumulate(model):
                 current_router_labels = batch.get("router_labels") if train_router else None
 
