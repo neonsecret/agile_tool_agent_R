@@ -72,4 +72,5 @@ data:
   mask_token: null # null = use <|reserved_special_token_2|> (recommended), "eos" = use EOS, or specify token string
   null_token: null # null = use <|reserved_special_token_11|> for variable-length fields (automatic budgeting)
   chat_sampling_rate: 0.1  # Sampling rate for chat examples (router_label=0). 0.1 = 10% of chat turns
+  bucket_sizes: [512, 1024, 1536, 2048]  # Fixed buckets for padding/compile stability
 

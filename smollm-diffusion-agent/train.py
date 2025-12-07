@@ -2,8 +2,8 @@ import torch
 import yaml
 import random
 from torch.utils.data import DataLoader, random_split
-from torch.nn.utils.rnn import pad_sequence
 from torch.optim import AdamW
+import torch.nn.functional as F
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from accelerate import Accelerator
 from accelerate.utils import set_seed
@@ -45,32 +45,54 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
     return start_epoch, best_eval_loss
 
 
-def collate_fn(batch):
-    input_ids = [item['input_ids'] for item in batch]
-    attention_mask = [item['attention_mask'] for item in batch]
-    scaffold_mask = [item['scaffold_mask'] for item in batch]
-    labels = [item['labels'] for item in batch]
+def build_collate_fn(bucket_sizes, max_seq_len):
+    """Create a collate_fn that pads to the next bucket size >= batch max length.
 
-    router_labels = None
-    if 'router_label' in batch[0]:
-        router_labels = torch.tensor([item['router_label'] for item in batch], dtype=torch.long)
+    This keeps shapes more stable for torch.compile and CUDA graphs.
+    """
+    bucket_sizes = sorted(bucket_sizes)
 
-    input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=0)
-    attention_mask_padded = pad_sequence(attention_mask, batch_first=True, padding_value=0)
-    scaffold_mask_padded = pad_sequence(scaffold_mask, batch_first=True, padding_value=False)
-    labels_padded = pad_sequence(labels, batch_first=True, padding_value=-100)
+    def collate_fn(batch):
+        # Determine target pad length: next bucket >= max length in batch
+        max_len = max(item["input_ids"].size(0) for item in batch)
+        pad_to = None
+        for b in bucket_sizes:
+            if b >= max_len:
+                pad_to = b
+                break
+        if pad_to is None:
+            pad_to = bucket_sizes[-1]
+        pad_to = min(pad_to, max_seq_len)
 
-    batch_dict = {
-        "input_ids": input_ids_padded,
-        "attention_mask": attention_mask_padded,
-        "scaffold_mask": scaffold_mask_padded,
-        "labels": labels_padded
-    }
+        def pad_tensor(t: torch.Tensor, pad_value: int):
+            if t.size(0) > pad_to:
+                return t[:pad_to]
+            if t.size(0) == pad_to:
+                return t
+            pad_width = pad_to - t.size(0)
+            return F.pad(t, (0, pad_width), value=pad_value)
 
-    if router_labels is not None:
-        batch_dict["router_labels"] = router_labels
+        input_ids = [pad_tensor(item["input_ids"], pad_value=0) for item in batch]
+        attention_mask = [pad_tensor(item["attention_mask"], pad_value=0) for item in batch]
+        scaffold_mask = [pad_tensor(item["scaffold_mask"], pad_value=0) for item in batch]
+        labels = [pad_tensor(item["labels"], pad_value=-100) for item in batch]
 
-    return batch_dict
+        batch_dict = {
+            "input_ids": torch.stack(input_ids, dim=0),
+            "attention_mask": torch.stack(attention_mask, dim=0),
+            "scaffold_mask": torch.stack(scaffold_mask, dim=0),
+            "labels": torch.stack(labels, dim=0),
+        }
+
+        if "router_label" in batch[0]:
+            router_labels = torch.tensor(
+                [item["router_label"] for item in batch], dtype=torch.long
+            )
+            batch_dict["router_labels"] = router_labels
+
+        return batch_dict
+
+    return collate_fn
 
 
 def evaluate(model, eval_dataloader, accelerator, train_router):
@@ -325,6 +347,7 @@ def train():
     diff_cfg = config["diffusion"]
     quant_cfg = config.get("quantization", {})
     compile_cfg = training_cfg.get("compile", {})
+    bucket_sizes = data_cfg.get("bucket_sizes", [512, 1024, 1536, 2048])
 
     # 1. Initialize Accelerator with W&B
     accelerator = Accelerator(
@@ -406,6 +429,15 @@ def train():
         accelerator.print(f"torch.compile enabled for training (mode={compile_mode}, fullgraph={compile_fullgraph})")
         accelerator.print("Note: for best stability, pad/bucket sequences to fixed lengths per batch.")
         try:
+            # Disable CUDA graphs during training compile to avoid CUDAGraph reuse issues
+            try:
+                import torch._inductor.config as inductor_config  # type: ignore
+                inductor_config.triton.cudagraphs = False
+                inductor_config.cpp.cudagraphs = False
+                accelerator.print("Inductor CUDA graphs disabled for training compile.")
+            except Exception as e:  # pragma: no cover - best-effort
+                accelerator.print(f"Warning: could not disable inductor cudagraphs: {e}")
+
             model = torch.compile(
                 model,
                 mode=compile_mode,
@@ -443,14 +475,14 @@ def train():
         train_dataset,
         batch_size=training_cfg["batch_size"],
         shuffle=True,
-        collate_fn=collate_fn
+        collate_fn=build_collate_fn(bucket_sizes, training_cfg["max_seq_len"])
     )
 
     eval_dataloader = DataLoader(
         eval_dataset,
         batch_size=training_cfg["batch_size"],
         shuffle=False,
-        collate_fn=collate_fn
+        collate_fn=build_collate_fn(bucket_sizes, training_cfg["max_seq_len"])
     )
 
     # 4. Optimizer
