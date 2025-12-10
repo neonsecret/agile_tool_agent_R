@@ -104,19 +104,27 @@ def evaluate(model, eval_dataloader, accelerator, train_router):
     total_router_correct = 0
     total_router_samples = 0
     num_batches = 0
+    
+    # Track per-class router accuracy
+    router_predictions = []
+    router_labels_list = []
 
     eval_bar = tqdm(eval_dataloader, desc="Evaluating", disable=not accelerator.is_local_main_process)
 
     with torch.no_grad():
         for batch in eval_bar:
-            current_router_labels = batch.get("router_labels") if train_router else None
+            # Always get router labels for accuracy tracking (independent of train_router)
+            current_router_labels = batch.get("router_labels")
+            
+            # Only pass router_labels to model if training router (affects loss computation)
+            router_labels_for_loss = current_router_labels if train_router else None
 
             outputs = model(
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
                 labels=batch["labels"],
                 scaffold_mask=batch["scaffold_mask"],
-                router_labels=current_router_labels
+                router_labels=router_labels_for_loss
             )
 
             if outputs["loss"] is not None:
@@ -129,11 +137,16 @@ def evaluate(model, eval_dataloader, accelerator, train_router):
                 if "router" in losses_detail:
                     total_router_loss += losses_detail["router"].item()
 
-                # Calculate router accuracy if training router
-                if train_router and "router_logits" in outputs and current_router_labels is not None:
+                # Calculate router accuracy ALWAYS (independent of train_router flag)
+                # This lets us monitor router even if we're not training it yet
+                if "router_logits" in outputs and current_router_labels is not None:
                     router_preds = torch.argmax(outputs["router_logits"], dim=-1)
                     total_router_correct += (router_preds == current_router_labels).sum().item()
                     total_router_samples += current_router_labels.size(0)
+                    
+                    # Collect for per-class analysis
+                    router_predictions.extend(router_preds.cpu().tolist())
+                    router_labels_list.extend(current_router_labels.cpu().tolist())
 
     model.train()
 
@@ -142,9 +155,30 @@ def evaluate(model, eval_dataloader, accelerator, train_router):
         "eval/diffusion_loss": total_diffusion_loss / max(num_batches, 1),
     }
 
-    if train_router and total_router_samples > 0:
+    if train_router:
         metrics["eval/router_loss"] = total_router_loss / max(num_batches, 1)
-        metrics["eval/router_accuracy"] = total_router_correct / total_router_samples
+    
+    # Always track router accuracy if we have predictions
+    if total_router_samples > 0:
+        router_accuracy = total_router_correct / total_router_samples
+        metrics["eval/router_accuracy"] = router_accuracy
+        
+        # Per-class accuracy: Chat (0), Tool (1), Think (2)
+        class_names = ["chat", "tool", "think"]
+        for class_idx, class_name in enumerate(class_names):
+            class_mask = [label == class_idx for label in router_labels_list]
+            if sum(class_mask) > 0:
+                class_preds = [pred for pred, mask in zip(router_predictions, class_mask) if mask]
+                class_labels = [label for label, mask in zip(router_labels_list, class_mask) if mask]
+                class_acc = sum(p == l for p, l in zip(class_preds, class_labels)) / len(class_labels)
+                metrics[f"eval/router_accuracy_{class_name}"] = class_acc
+        
+        if accelerator.is_local_main_process:
+            accelerator.print(f"Router Accuracy: {router_accuracy:.4f}")
+            for class_name in class_names:
+                key = f"eval/router_accuracy_{class_name}"
+                if key in metrics:
+                    accelerator.print(f"  {class_name.capitalize()}: {metrics[key]:.4f}")
 
     return metrics
 

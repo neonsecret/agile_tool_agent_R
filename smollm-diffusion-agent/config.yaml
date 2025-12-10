@@ -32,7 +32,7 @@ training:
   learning_rate: 1.0e-4
   num_epochs: 4
   gradient_accumulation_steps: 2
-  train_router: false
+  train_router: true  # Enable router training (Chat=0, Tool=1, Think=2)
   max_seq_len: 2048  # Increased from 1024: median=1198, 90th percentile=2278
   max_new_tokens: 256
   seed: 42

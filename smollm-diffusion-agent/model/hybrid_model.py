@@ -12,7 +12,14 @@ from data.device_utils import get_device, get_device_map_for_quantization
 
 
 class RouterHead(nn.Module):
-    def __init__(self, hidden_size, num_classes=2):
+    def __init__(self, hidden_size, num_classes=3):
+        """
+        Mode router for Chat/Think/Tool classification.
+        
+        Args:
+            hidden_size: Size of input hidden states
+            num_classes: Number of modes (3: Chat=0, Tool=1, Think=2)
+        """
         super().__init__()
         self.classifier = nn.Linear(hidden_size, num_classes)
 
@@ -67,7 +74,7 @@ class HybridSmolLM(nn.Module):
             use_bidirectional=use_bidirectional,
             num_heads=num_heads
         )
-        self.router_head = RouterHead(hidden_size, num_classes=2)
+        self.router_head = RouterHead(hidden_size, num_classes=3)  # Chat=0, Tool=1, Think=2
 
         self.diffusion_head = self.diffusion_head.to(dtype=torch.bfloat16)
         self.router_head = self.router_head.to(dtype=torch.bfloat16)

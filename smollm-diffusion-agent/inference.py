@@ -101,6 +101,12 @@ def _apply_gumbel_noise(logits: torch.Tensor, temperature: float) -> torch.Tenso
 class FunctionCallGenerator:
     """Runs the S3 denoising loop with top-K remasking.
     
+    Now includes full pipeline:
+    - Router mode selection (Chat/Think/Tool)
+    - Decision token generation (use_tool/answer)
+    - Function name generation (AR)
+    - Diffusion parameter filling (existing S3 strategy)
+    
     Optimizations:
     - KV cache reuse: Caches base LLM KV states for prompt, reuses across diffusion steps
     - torch.compile: JIT compiles diffusion head for faster execution
@@ -143,6 +149,11 @@ class FunctionCallGenerator:
         self._cuda_graph: Optional[torch.cuda.CUDAGraph] = None
         self._graph_inputs: Dict[str, torch.Tensor] = {}
         self._graph_outputs: Optional[torch.Tensor] = None
+        
+        # Mode labels
+        self.MODE_CHAT = 0
+        self.MODE_TOOL = 1
+        self.MODE_THINK = 2
 
     def _compile_diffusion_head(self):
         """Apply torch.compile to diffusion head for JIT optimization.
@@ -243,6 +254,204 @@ class FunctionCallGenerator:
         # Filter out NULL tokens - works on CPU tensors
         mask = tokens != null_token_id
         return tokens[mask]
+    
+    def route_mode(self, prompt: str) -> int:
+        """
+        Use router head to classify mode: Chat (0), Tool (1), or Think (2).
+        
+        Args:
+            prompt: User query
+        
+        Returns:
+            Mode index: 0=Chat, 1=Tool, 2=Think
+        """
+        with torch.no_grad():
+            # Encode prompt
+            prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False, return_tensors="pt")
+            prompt_ids = prompt_ids.to(self.device)
+            
+            # Get hidden states from base model
+            outputs = self.model.get_hidden_states(
+                input_ids=prompt_ids,
+                attention_mask=torch.ones_like(prompt_ids),
+                output_hidden_states=True
+            )
+            hidden_states = outputs.hidden_states[-1]
+            
+            # Router prediction
+            router_logits = self.model.router_head(hidden_states)
+            mode = torch.argmax(router_logits, dim=-1).item()
+            
+            return mode
+    
+    def generate_chat(self, prompt: str, max_new_tokens: int = 256) -> str:
+        """
+        Standard autoregressive generation for chat mode.
+        
+        Args:
+            prompt: User query
+            max_new_tokens: Maximum tokens to generate
+        
+        Returns:
+            Generated response
+        """
+        with torch.no_grad():
+            # Encode prompt
+            prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False, return_tensors="pt")
+            prompt_ids = prompt_ids.to(self.device)
+            
+            # Generate using base model
+            if not self.model.use_mlx:
+                output_ids = self.model.base_llm.generate(
+                    prompt_ids,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9,
+                    pad_token_id=self.tokenizer.pad_token_id
+                )
+            else:
+                # MLX doesn't have .generate() - use forward passes
+                # For now, return a placeholder
+                return "[Chat mode not fully implemented for MLX backend]"
+            
+            # Decode response
+            response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+            # Remove prompt from response
+            prompt_text = self.tokenizer.decode(prompt_ids[0], skip_special_tokens=True)
+            if response.startswith(prompt_text):
+                response = response[len(prompt_text):].strip()
+            
+            return response
+    
+    def generate_think(self, prompt: str, max_new_tokens: int = 512) -> str:
+        """
+        Autoregressive generation with Chain-of-Thought for think mode.
+        
+        Uses SmolLM3's built-in <|thinking|> capability.
+        
+        Args:
+            prompt: User query
+            max_new_tokens: Maximum tokens to generate (longer for CoT)
+        
+        Returns:
+            Generated response with thinking traces
+        """
+        with torch.no_grad():
+            # Add thinking token to prompt
+            thinking_prompt = f"{prompt}\n<|thinking|>"
+            prompt_ids = self.tokenizer.encode(thinking_prompt, add_special_tokens=False, return_tensors="pt")
+            prompt_ids = prompt_ids.to(self.device)
+            
+            # Generate using base model
+            if not self.model.use_mlx:
+                output_ids = self.model.base_llm.generate(
+                    prompt_ids,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9,
+                    pad_token_id=self.tokenizer.pad_token_id
+                )
+            else:
+                return "[Think mode not fully implemented for MLX backend]"
+            
+            # Decode response
+            response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+            # Remove prompt from response
+            prompt_text = self.tokenizer.decode(prompt_ids[0], skip_special_tokens=True)
+            if response.startswith(prompt_text):
+                response = response[len(prompt_text):].strip()
+            
+            return response
+    
+    def predict_decision(self, prompt: str) -> str:
+        """
+        Use AR model to generate decision token: <|decision:use_tool|> or <|decision:answer|>.
+        
+        Args:
+            prompt: User query
+        
+        Returns:
+            "use_tool" or "answer"
+        """
+        with torch.no_grad():
+            # Encode prompt with assistant start
+            decision_prompt = f"{prompt}\n<|im_start|>assistant\n"
+            prompt_ids = self.tokenizer.encode(decision_prompt, add_special_tokens=False, return_tensors="pt")
+            prompt_ids = prompt_ids.to(self.device)
+            
+            # Generate decision token (short generation)
+            if not self.model.use_mlx:
+                output_ids = self.model.base_llm.generate(
+                    prompt_ids,
+                    max_new_tokens=30,
+                    do_sample=False,  # Greedy for decision
+                    pad_token_id=self.tokenizer.pad_token_id
+                )
+            else:
+                # MLX fallback
+                return "use_tool"  # Default to tool for now
+            
+            # Decode and parse decision
+            generated = self.tokenizer.decode(output_ids[0], skip_special_tokens=False)
+            
+            if "<|decision:use_tool|>" in generated:
+                return "use_tool"
+            elif "<|decision:answer|>" in generated:
+                return "answer"
+            else:
+                # Fallback: if no clear decision, default to answer
+                return "answer"
+    
+    def predict_tool_name(self, prompt: str, tool_registry: dict) -> Optional[str]:
+        """
+        Use AR model to generate tool name: <|tool_name:function_name|>.
+        
+        Args:
+            prompt: User query
+            tool_registry: Dict of available tools {name: schema}
+        
+        Returns:
+            Tool name string, or None if parsing fails
+        """
+        with torch.no_grad():
+            # Encode prompt with decision token
+            tool_prompt = f"{prompt}\n<|im_start|>assistant\n<|decision:use_tool|>\n"
+            prompt_ids = self.tokenizer.encode(tool_prompt, add_special_tokens=False, return_tensors="pt")
+            prompt_ids = prompt_ids.to(self.device)
+            
+            # Generate tool name (short generation)
+            if not self.model.use_mlx:
+                output_ids = self.model.base_llm.generate(
+                    prompt_ids,
+                    max_new_tokens=50,
+                    do_sample=False,  # Greedy for tool selection
+                    pad_token_id=self.tokenizer.pad_token_id
+                )
+            else:
+                # MLX fallback - return first available tool
+                return list(tool_registry.keys())[0] if tool_registry else None
+            
+            # Decode and parse tool name
+            generated = self.tokenizer.decode(output_ids[0], skip_special_tokens=False)
+            
+            # Look for <|tool_name:xxx|> pattern
+            import re
+            match = re.search(r'<\|tool_name:(\w+)\|>', generated)
+            if match:
+                tool_name = match.group(1)
+                # Verify tool exists in registry
+                if tool_name in tool_registry:
+                    return tool_name
+            
+            # Fallback: try to find any tool name mentioned in generated text
+            for tool_name in tool_registry.keys():
+                if tool_name in generated.lower():
+                    return tool_name
+            
+            # Last resort: return first tool
+            return list(tool_registry.keys())[0] if tool_registry else None
 
     def _build_messages(self, prompt: str) -> List[Dict[str, str]]:
         """Build chat template messages matching training format.
@@ -417,6 +626,139 @@ class FunctionCallGenerator:
             logits = self.model.diffusion_head.predict(hidden_states, sequence, t)
 
         return logits
+
+    def generate_unified(
+            self,
+            prompt: str,
+            tool_registry: Optional[dict] = None,
+            config: Optional[GenerationConfig] = None,
+            use_router: bool = True,
+    ) -> Dict[str, any]:
+        """
+        Complete unified inference pipeline with routing.
+        
+        Flow:
+        1. Router classifies mode (Chat/Think/Tool)
+        2. If Tool mode:
+           a. Generate decision token (use_tool/answer)
+           b. Generate function name
+           c. Run diffusion for parameters
+        3. If Chat/Think: Use AR generation
+        
+        Args:
+            prompt: User query
+            tool_registry: Dict of available tools {name: schema}
+            config: Generation configuration
+            use_router: Whether to use router (False = skip to tool mode for testing)
+        
+        Returns:
+            Dict with 'mode', 'response', and optional 'tool_call' info
+        """
+        cfg = config or GenerationConfig()
+        
+        # Step 1: Route mode
+        if use_router:
+            mode = self.route_mode(prompt)
+            mode_name = ["chat", "tool", "think"][mode]
+            print(f"Router selected mode: {mode_name}")
+        else:
+            mode = self.MODE_TOOL
+            mode_name = "tool"
+            print("Skipping router, using tool mode")
+        
+        # Step 2: Execute based on mode
+        if mode == self.MODE_CHAT:
+            response = self.generate_chat(prompt)
+            return {
+                "mode": "chat",
+                "response": response
+            }
+        
+        elif mode == self.MODE_THINK:
+            response = self.generate_think(prompt)
+            return {
+                "mode": "think",
+                "response": response
+            }
+        
+        elif mode == self.MODE_TOOL:
+            if tool_registry is None or len(tool_registry) == 0:
+                # Fallback to chat if no tools available
+                print("No tools available, falling back to chat mode")
+                response = self.generate_chat(prompt)
+                return {
+                    "mode": "chat",
+                    "response": response,
+                    "note": "Fallback from tool mode due to no tools"
+                }
+            
+            # Step 3a: Generate decision token
+            decision = self.predict_decision(prompt)
+            print(f"Decision: {decision}")
+            
+            if decision == "answer":
+                # Model decided not to use tool, generate direct answer
+                response = self.generate_chat(prompt)
+                return {
+                    "mode": "tool",
+                    "decision": "answer",
+                    "response": response
+                }
+            
+            # Step 3b: Generate tool name
+            tool_name = self.predict_tool_name(prompt, tool_registry)
+            print(f"Selected tool: {tool_name}")
+            
+            if tool_name is None:
+                # Failed to select tool, fallback to chat
+                print("Failed to select tool, falling back to chat")
+                response = self.generate_chat(prompt)
+                return {
+                    "mode": "tool",
+                    "decision": "use_tool",
+                    "response": response,
+                    "note": "Fallback due to tool selection failure"
+                }
+            
+            # Step 3c: Get tool schema and run diffusion
+            tool_schema = tool_registry[tool_name]
+            
+            # Build fields from schema
+            fields = build_fields_from_schema(
+                tool_schema,
+                self.tokenizer,
+                min_budget=MIN_FIELD_BUDGET,
+                max_budget=DEFAULT_MAX_BUDGET
+            )
+            
+            # Build template
+            mask_token_str = self.tokenizer.convert_ids_to_tokens([self.model.diffusion_head.mask_token_id])[0]
+            null_token_id = self.model.diffusion_head.null_token_id
+            null_token_str = self.tokenizer.convert_ids_to_tokens([null_token_id])[0] if null_token_id else None
+            
+            template = build_schema_template(
+                tokenizer=self.tokenizer,
+                fields=fields,
+                mask_token=mask_token_str,
+                null_token=null_token_str,
+                include_codeblock=False
+            )
+            
+            # Run diffusion generation
+            output = self.generate(
+                prompt=prompt,
+                template=template,
+                config=cfg,
+                tool_name=tool_name
+            )
+            
+            return {
+                "mode": "tool",
+                "decision": "use_tool",
+                "tool_name": tool_name,
+                "tool_call": output.text,
+                "steps_executed": output.steps_executed
+            }
 
     def generate(
             self,
@@ -779,28 +1121,80 @@ def demo_inference():
     print(f"Optimizations: torch.compile={use_torch_compile}, cuda_graph={use_cuda_graph}, kv_cache={use_kv_cache}")
 
     prompt = "What's the weather in London?"
-    tool_name = "get_weather"
-
-    # Define tool schema (in production, this would come from API/tool registry)
-    tool_schema = {
-        "name": "get_weather",
-        "parameters": {
-            "properties": {
-                "location": {
-                    "type": "string",
-                    "description": "City name or location"
-                },
-                "units": {
-                    "type": "string",
-                    "enum": ["C", "F"],
-                    "description": "Temperature units"
+    
+    # Define tool registry (in production, this would come from API/tool registry)
+    tool_registry = {
+        "get_weather": {
+            "name": "get_weather",
+            "parameters": {
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "City name or location"
+                    },
+                    "units": {
+                        "type": "string",
+                        "enum": ["C", "F"],
+                        "description": "Temperature units"
+                    }
+                }
+            }
+        },
+        "search_web": {
+            "name": "search_web",
+            "parameters": {
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    }
                 }
             }
         }
     }
 
-    # Automatically build fields from schema with proper budgeting
-    # No hardcoded numbers - fully automatic!
+    config = GenerationConfig(
+        steps=steps,
+        temperature=temperature,
+        cfg_scale=cfg_scale,
+        show_steps=True,
+        use_kv_cache=use_kv_cache,
+        use_cuda_graph=use_cuda_graph
+    )
+    
+    print("\n" + "="*80)
+    print("UNIFIED PIPELINE DEMO")
+    print("="*80)
+    
+    # Test unified pipeline
+    result = generator.generate_unified(
+        prompt=prompt,
+        tool_registry=tool_registry,
+        config=config,
+        use_router=True  # Enable full routing
+    )
+    
+    print(f"\n{'='*80}")
+    print("RESULT")
+    print("="*80)
+    print(f"Mode: {result['mode']}")
+    if 'decision' in result:
+        print(f"Decision: {result['decision']}")
+    if 'tool_name' in result:
+        print(f"Tool: {result['tool_name']}")
+    if 'tool_call' in result:
+        print(f"Tool Call: {result['tool_call']}")
+    if 'response' in result:
+        print(f"Response: {result['response']}")
+    if 'steps_executed' in result:
+        print(f"Steps: {result['steps_executed']}")
+    
+    # Also demo the old direct method for comparison
+    print(f"\n{'='*80}")
+    print("DIRECT TOOL MODE (no routing)")
+    print("="*80)
+    
+    tool_schema = tool_registry["get_weather"]
     fields = build_fields_from_schema(
         tool_schema,
         tokenizer,
@@ -816,7 +1210,7 @@ def demo_inference():
         fields=fields,
         mask_token=mask_token_str,
         null_token=null_token_str,
-        include_codeblock=False  # Match training format
+        include_codeblock=False
     )
 
     validate_mask_token_consistency(
@@ -827,21 +1221,12 @@ def demo_inference():
 
     print(f"Scaffold template: {template.text}")
 
-    config = GenerationConfig(
-        steps=steps,
-        temperature=temperature,
-        cfg_scale=cfg_scale,
-        show_steps=True,
-        use_kv_cache=use_kv_cache,
-        use_cuda_graph=use_cuda_graph
-    )
-
     output = generator.generate(
         prompt=prompt,
         template=template,
         config=config,
         trace=True,
-        tool_name=tool_name  # Pass tool name for proper prompt formatting
+        tool_name="get_weather"
     )
 
     print(f"\nGenerated text: {output.text}")

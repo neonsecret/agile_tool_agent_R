@@ -11,9 +11,11 @@ from transformers import AutoTokenizer
 try:
     from .schema import build_schema_template
     from .utils import resolve_mask_token, resolve_null_token
+    from .system_prompts import get_random_system_prompt, format_system_message
 except:
     from schema import build_schema_template
     from utils import resolve_mask_token, resolve_null_token
+    from system_prompts import get_random_system_prompt, format_system_message
 
 
 # Budget configuration - matches guide.md recommendations
@@ -99,17 +101,43 @@ class SmartScaffoldDataset(Dataset):
         return processed
 
     def _build_prompt_context(self, msg_idx, conversations, current_text):
-        # Context up to this message
+        """
+        Build prompt context with system prompt augmentation.
+        
+        Replaces the first system message with a random one 50% of the time,
+        or removes it 10% of the time (40% keeps original).
+        """
         prompt = ""
-        for prev_msg in conversations[:msg_idx]:
+        
+        # Track if we've seen/replaced the first system message
+        replaced_system = False
+        
+        # Add conversation history
+        for i, prev_msg in enumerate(conversations[:msg_idx]):
             role = prev_msg['from']
             if role == 'gpt': role = 'assistant'
             if role == 'human': role = 'user'
-            prompt += f"<|im_start|>{role}\n{prev_msg['value']}<|im_end|>\n"
+            
+            # Handle first system message specially
+            if role == 'system' and not replaced_system:
+                replaced_system = True
+                
+                # System prompt augmentation: 50% replace, 10% remove, 40% keep original
+                rand = random.random()
+                if rand < 0.5:
+                    # 50%: Replace with random system prompt
+                    system_prompt = get_random_system_prompt(none_probability=0.0)  # Always return a prompt
+                    prompt += f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+                elif rand < 0.6:
+                    # 10%: Remove system prompt entirely (skip it)
+                    pass
+                else:
+                    # 40%: Keep original system message
+                    prompt += f"<|im_start|>{role}\n{prev_msg['value']}<|im_end|>\n"
+            else:
+                # Normal message (not first system)
+                prompt += f"<|im_start|>{role}\n{prev_msg['value']}<|im_end|>\n"
 
-        # Current message starts
-        # For tool call, we cut off before <tool_call>
-        # For chat, we just prompt
         return prompt, current_text
 
     def _process_tool_call(self, msg, msg_idx, conversations, tools_schema, processed):
@@ -159,7 +187,7 @@ class SmartScaffoldDataset(Dataset):
             val_ids = self.tokenizer.encode(val, add_special_tokens=False)
             # EOS tokens are structural - Python/template handles them, not the model
             # This aligns with schema scaffolding: Python does syntax, LLM does semantics
-            
+
             # Automatic budget: min for consistency, max to prevent excessive memory
             budget = min(max(len(val_ids), MIN_FIELD_BUDGET), self.mask_budget)
             fields.append((key, budget))
