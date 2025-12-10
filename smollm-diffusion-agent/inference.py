@@ -27,6 +27,7 @@ import yaml
 from model.hybrid_model import HybridSmolLM
 from data.schema import SchemaTemplate, build_schema_template
 from data.utils import resolve_mask_token, resolve_null_token, validate_mask_token_consistency
+from data.budget_utils import build_fields_from_schema, print_budget_info, MIN_FIELD_BUDGET, DEFAULT_MAX_BUDGET
 from data.device_utils import empty_cache, synchronize
 
 
@@ -244,16 +245,44 @@ class FunctionCallGenerator:
         return tokens[mask]
 
     def _build_messages(self, prompt: str) -> List[Dict[str, str]]:
-        """Build chat template messages."""
+        """Build chat template messages matching training format.
+        
+        Training format includes:
+        - System message with full conversation
+        - Special tokens: <|decision:use_tool|>, <|tool_name:...|>
+        """
         return [{"role": "user", "content": prompt}]
 
-    def _encode_prompt(self, prompt: str) -> torch.Tensor:
-        """Encode prompt using chat template."""
-        chat_ids = self.tokenizer.apply_chat_template(
-            self._build_messages(prompt),
-            add_generation_prompt=True,
-            tokenize=True,
+    def _encode_prompt(self, prompt: str, tool_name: str = "get_weather") -> torch.Tensor:
+        """Encode prompt using format that matches training data.
+        
+        During training, prompts have this structure:
+        <|im_start|>system
+        ...system prompt...
+        <|im_end|>
+        <|im_start|>user  
+        ...user query...
+        <|im_end|>
+        <|im_start|>assistant
+        <|decision:use_tool|>
+        <|tool_name:TOOL_NAME|>
+        
+        This matches the format from dataset_loader.py lines 131-135
+        """
+        # Build structured prompt matching training format
+        system_prompt = "You are a helpful assistant with access to tools."
+        
+        structured_prompt = (
+            f"<|im_start|>system\n"
+            f"{system_prompt}<|im_end|>\n"
+            f"<|im_start|>user\n"
+            f"{prompt}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+            f"<|decision:use_tool|>\n"
+            f"<|tool_name:{tool_name}|>\n"
         )
+        
+        chat_ids = self.tokenizer.encode(structured_prompt, add_special_tokens=False)
         return torch.tensor(chat_ids, dtype=torch.long, device=self.device).unsqueeze(0)
 
     def _initialise_sequence(
@@ -396,6 +425,7 @@ class FunctionCallGenerator:
             config: Optional[GenerationConfig] = None,
             trace: bool = False,
             callback: Optional[Callable[[int, torch.Tensor, int], None]] = None,
+            tool_name: str = "generic_tool",
     ) -> GenerationOutput:
         """
         Main inference loop combining AR + Scaffolding + Diffusion.
@@ -433,7 +463,7 @@ class FunctionCallGenerator:
         self._cached_prompt_hidden_states = None
 
         with torch.no_grad():
-            prompt_ids = self._encode_prompt(prompt)
+            prompt_ids = self._encode_prompt(prompt, tool_name)
             sequence = self._initialise_sequence(prompt_ids, template)
             prompt_length = prompt_ids.shape[1]
             del prompt_ids
@@ -622,7 +652,7 @@ class FunctionCallGenerator:
 
 
 def demo_inference():
-    """Demo function showing how to use the generator."""
+    """Demo function showing how to use the generator with automatic budgeting."""
     device = torch.device(
         "cuda" if torch.cuda.is_available()
         else "mps" if torch.backends.mps.is_available()
@@ -651,8 +681,13 @@ def demo_inference():
     # Resolve NULL token for self-adaptive masking
     null_token_config = data_cfg.get("null_token", None)
     null_token_str, null_token_id = resolve_null_token(tokenizer, null_token_config)
+    
+    # Get budget settings from config (matches training)
+    min_field_budget = MIN_FIELD_BUDGET
+    max_field_budget = data_cfg.get("mask_budget", DEFAULT_MAX_BUDGET)
 
     print(f"Using mask token: {mask_token_str} (ID: {mask_token_id})")
+    print(f"Budget range: {min_field_budget}-{max_field_budget} tokens per field")
     print(f"Tokenizer vocab size: {len(tokenizer)}")
 
     # Check for checkpoint
@@ -744,18 +779,44 @@ def demo_inference():
     print(f"Optimizations: torch.compile={use_torch_compile}, cuda_graph={use_cuda_graph}, kv_cache={use_kv_cache}")
 
     prompt = "What's the weather in London?"
+    tool_name = "get_weather"
 
-    fields = [
-        ("location", 10),
-        ("topic", 10),
-    ]
+    # Define tool schema (in production, this would come from API/tool registry)
+    tool_schema = {
+        "name": "get_weather",
+        "parameters": {
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": "City name or location"
+                },
+                "units": {
+                    "type": "string",
+                    "enum": ["C", "F"],
+                    "description": "Temperature units"
+                }
+            }
+        }
+    }
+
+    # Automatically build fields from schema with proper budgeting
+    # No hardcoded numbers - fully automatic!
+    fields = build_fields_from_schema(
+        tool_schema,
+        tokenizer,
+        min_budget=min_field_budget,
+        max_budget=max_field_budget
+    )
+    
+    print("\nAutomatic budget calculation:")
+    print_budget_info(fields)
 
     template = build_schema_template(
         tokenizer=tokenizer,
         fields=fields,
         mask_token=mask_token_str,
         null_token=null_token_str,
-        include_codeblock=False
+        include_codeblock=False  # Match training format
     )
 
     validate_mask_token_consistency(
@@ -779,7 +840,8 @@ def demo_inference():
         prompt=prompt,
         template=template,
         config=config,
-        trace=True
+        trace=True,
+        tool_name=tool_name  # Pass tool name for proper prompt formatting
     )
 
     print(f"\nGenerated text: {output.text}")

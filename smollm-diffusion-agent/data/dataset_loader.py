@@ -16,6 +16,13 @@ except:
     from utils import resolve_mask_token, resolve_null_token
 
 
+# Budget configuration - matches guide.md recommendations
+# Minimum budget ensures consistency across fields (prevents too-small templates)
+# Maximum budget prevents excessive memory usage
+MIN_FIELD_BUDGET = 32
+DEFAULT_MAX_BUDGET = 48
+
+
 class SmartScaffoldDataset(Dataset):
     def __init__(self, tokenizer, split="train", max_seq_len=1024, max_new_tokens=256, limit=None,
                  mask_token=None, null_token=None, chat_sampling_rate=0.1, mask_budget=48):
@@ -150,10 +157,11 @@ class SmartScaffoldDataset(Dataset):
                 val = json.dumps(val)
 
             val_ids = self.tokenizer.encode(val, add_special_tokens=False)
-            if self.eos_token_id is not None:
-                val_ids.append(self.eos_token_id)
-
-            budget = min(max(len(val_ids), 32), self.mask_budget)
+            # EOS tokens are structural - Python/template handles them, not the model
+            # This aligns with schema scaffolding: Python does syntax, LLM does semantics
+            
+            # Automatic budget: min for consistency, max to prevent excessive memory
+            budget = min(max(len(val_ids), MIN_FIELD_BUDGET), self.mask_budget)
             fields.append((key, budget))
             target_tokens_map[key] = val_ids
 
