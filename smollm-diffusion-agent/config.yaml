@@ -58,7 +58,7 @@ training:
 # Inference Configuration
 inference:
   use_kv_cache: true       # Reuse base-LLM KV for prompt across diffusion steps
-  use_torch_compile: true  # Enable torch.compile for diffusion head (CUDA only; falls back if unsupported)
+  use_torch_compile: false  # Enable torch.compile for diffusion head (CUDA only; falls back if unsupported)
   use_cuda_graph: true     # Enable CUDA graphs for diffusion head (requires fixed shapes; falls back if mismatch)
   steps: 4
   temperature: 0.0

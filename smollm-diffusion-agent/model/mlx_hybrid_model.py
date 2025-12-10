@@ -513,12 +513,14 @@ class HybridSmolLMMLX(nn.Module):
             params = self.base_model.parameters()
             if isinstance(params, dict) and params:
                 name, param = next(iter(params.items()))
-                print(f"Base model param sample: {name}, dtype={getattr(param, 'dtype', None)}, shape={getattr(param, 'shape', None)}")
+                print(
+                    f"Base model param sample: {name}, dtype={getattr(param, 'dtype', None)}, shape={getattr(param, 'shape', None)}")
         except Exception as e:
             print(f"Could not inspect base model parameters: {e}")
 
     def _cast_heads_to_dtype(self, dtype=mx.bfloat16):
         """Cast trainable heads to specified dtype (default bfloat16 to match PyTorch)."""
+
         def cast_params(module):
             params = module.parameters()
             new_params = {}
@@ -526,7 +528,8 @@ class HybridSmolLMMLX(nn.Module):
                 if isinstance(v, mx.array) and v.dtype == mx.float32:
                     new_params[k] = v.astype(dtype)
                 elif isinstance(v, dict):
-                    new_params[k] = {kk: vv.astype(dtype) if isinstance(vv, mx.array) and vv.dtype == mx.float32 else vv for kk, vv in v.items()}
+                    new_params[k] = {kk: vv.astype(dtype) if isinstance(vv, mx.array) and vv.dtype == mx.float32 else vv
+                                     for kk, vv in v.items()}
                 else:
                     new_params[k] = v
             module.update(new_params)
@@ -570,53 +573,15 @@ class HybridSmolLMMLX(nn.Module):
 
         model = self.base_model
 
-        # Try different model structures
-        if hasattr(model, "model"):
-            # Wrapper model (e.g., LlamaForCausalLM)
-            inner_model = model.model
-        else:
-            inner_model = model
-
+        inner_model = model.model
         # Get embeddings
-        if hasattr(inner_model, "embed_tokens"):
-            x = inner_model.embed_tokens(input_ids)
-        elif hasattr(inner_model, "embeddings"):
-            x = inner_model.embeddings(input_ids)
-        elif hasattr(inner_model, "wte"):
-            x = inner_model.wte(input_ids)
-        else:
-            raise ValueError("Could not find embedding layer in model")
-
-        # Create attention mask if needed (causal mask is handled by layers)
-        # mlx_lm typically uses None for full attention
-        mask = None
-        if attention_mask is not None:
-            # Some models need explicit mask
-            pass  # Most mlx_lm models handle masking internally
+        x = inner_model.embed_tokens(input_ids)
 
         # Run through transformer layers
-        if hasattr(inner_model, "layers"):
-            for i, layer in enumerate(inner_model.layers):
-                # Different layers have different signatures
-                if hasattr(layer, "__call__"):
-                    # Try common signatures
-                    try:
-                        x = layer(x, mask=mask)
-                    except TypeError:
-                        try:
-                            x = layer(x)
-                        except TypeError:
-                            try:
-                                x = layer(x, attention_mask=mask)
-                            except Exception as e:
-                                raise ValueError(f"Layer {i} failed with error: {e}")
+        for i, layer in enumerate(inner_model.layers):
+            x = layer(x)
 
-        # Apply final layer norm if present
-        if hasattr(inner_model, "norm"):
-            x = inner_model.norm(x)
-        elif hasattr(inner_model, "ln_f"):
-            x = inner_model.ln_f(x)
-
+        x = inner_model.norm(x)
         return x
 
     def freeze_base_model(self):

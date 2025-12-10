@@ -203,12 +203,17 @@ class SchemaDiffusionHead(nn.Module):
         safe_tokens[safe_tokens < 0] = 0
         token_emb = self.token_emb(safe_tokens)
 
+        # Convert timestep to tensor if needed (keep as continuous float)
         if isinstance(t, (int, float)):
-            t = torch.full((hidden_states.shape[0],), t, device=hidden_states.device, dtype=torch.long)
-        elif t.dtype == torch.float:
-            t = (t * self.num_steps).long().clamp(0, self.num_steps)
+            t_tensor = torch.full((hidden_states.shape[0],), t, device=hidden_states.device, dtype=torch.float)
+        else:
+            t_tensor = t.float()
 
-        t_emb = self.time_embed(t).unsqueeze(1)
+        # Convert continuous t ∈ [0, 1] to discrete timestep indices for embedding lookup
+        # Scale t to [0, num_steps] range and clamp
+        t_indices = (t_tensor * self.num_steps).long().clamp(0, self.num_steps)
+
+        t_emb = self.time_embed(t_indices).unsqueeze(1)
 
         x = context + token_emb + t_emb
 

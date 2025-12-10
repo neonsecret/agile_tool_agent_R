@@ -43,7 +43,7 @@ def _can_use_torch_compile_mps(device: torch.device) -> bool:
     """Check if torch.compile works on MPS (requires PyTorch 2.1+)."""
     if device.type != "mps" or not torch.backends.mps.is_available():
         return False
-    
+
     # torch.compile on MPS requires PyTorch 2.1+
     try:
         version = torch.__version__.split('.')
@@ -111,18 +111,19 @@ class FunctionCallGenerator:
             model: HybridSmolLM,
             tokenizer: AutoTokenizer,
             device: torch.device,
-            use_torch_compile: bool = True,
+            use_torch_compile: bool = False,
             use_cuda_graph: bool = True,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self.model.eval()
-        
+
         # KV cache storage
         self._kv_cache: Optional[Tuple] = None
         self._cached_prompt_length: int = 0
-        
+        self._cached_prompt_hidden_states: Optional[torch.Tensor] = None
+
         # torch.compile optimization
         # For MPS: check if PyTorch version supports it (2.1+)
         # For CUDA/CPU: use if available
@@ -135,13 +136,13 @@ class FunctionCallGenerator:
                     print("torch.compile on MPS requires PyTorch 2.1+, using eager mode")
             else:
                 self._compile_diffusion_head()
-        
+
         # CUDA graph optimization
         self._cuda_graph_enabled = use_cuda_graph and _is_cuda_graph_supported(device)
         self._cuda_graph: Optional[torch.cuda.CUDAGraph] = None
         self._graph_inputs: Dict[str, torch.Tensor] = {}
         self._graph_outputs: Optional[torch.Tensor] = None
-    
+
     def _compile_diffusion_head(self):
         """Apply torch.compile to diffusion head for JIT optimization.
         
@@ -159,7 +160,7 @@ class FunctionCallGenerator:
                 # CUDA/CPU: use "reduce-overhead" for maximum performance
                 compile_mode = "reduce-overhead"
                 device_info = self.device.type.upper()
-            
+
             self.model.diffusion_head = torch.compile(
                 self.model.diffusion_head,
                 mode=compile_mode,
@@ -170,26 +171,26 @@ class FunctionCallGenerator:
         except Exception as e:
             print(f"torch.compile failed, using eager mode: {e}")
             self._compiled = False
-    
-    def _setup_cuda_graph(self, hidden_states: torch.Tensor, 
+
+    def _setup_cuda_graph(self, hidden_states: torch.Tensor,
                           current_tokens: torch.Tensor, t: torch.Tensor):
         """Capture CUDA graph for diffusion head forward pass."""
         if not self._cuda_graph_enabled:
             return
-        
+
         # Warmup runs required before graph capture
         for _ in range(3):
             _ = self.model.diffusion_head.predict(hidden_states, current_tokens, t)
-        
+
         synchronize(self.device)
-        
+
         # Create static input tensors for graph
         self._graph_inputs = {
             'hidden_states': hidden_states.clone(),
             'current_tokens': current_tokens.clone(),
             't': t.clone()
         }
-        
+
         # Capture graph
         self._cuda_graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._cuda_graph):
@@ -198,9 +199,9 @@ class FunctionCallGenerator:
                 self._graph_inputs['current_tokens'],
                 self._graph_inputs['t']
             )
-        
+
         print("CUDA graph captured for diffusion head")
-    
+
     def _run_cuda_graph(self, hidden_states: torch.Tensor,
                         current_tokens: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """Execute captured CUDA graph with new inputs."""
@@ -208,20 +209,21 @@ class FunctionCallGenerator:
         self._graph_inputs['hidden_states'].copy_(hidden_states)
         self._graph_inputs['current_tokens'].copy_(current_tokens)
         self._graph_inputs['t'].copy_(t)
-        
+
         # Replay graph
         self._cuda_graph.replay()
-        
+
         return self._graph_outputs.clone()
-    
+
     def clear_cache(self):
         """Clear KV cache and CUDA graph state."""
         self._kv_cache = None
         self._cached_prompt_length = 0
+        self._cached_prompt_hidden_states = None
         self._cuda_graph = None
         self._graph_inputs = {}
         self._graph_outputs = None
-    
+
     def _strip_null_tokens(self, tokens: torch.Tensor, null_token_id: Optional[int]) -> torch.Tensor:
         """Strip NULL tokens from output for variable-length field handling.
         
@@ -277,57 +279,67 @@ class FunctionCallGenerator:
         
         On first call: Compute full sequence, cache KV states for prompt portion.
         On subsequent calls: Reuse cached KV states for prompt, only compute scaffold portion.
+        
+        Note: KV cache only works with PyTorch backend. MLX backend runs full forward each time.
         """
         attention_mask = torch.ones_like(sequence)
-        
+
         with torch.no_grad():
-            if use_cache and self._kv_cache is not None and self._cached_prompt_length == prompt_length:
-                # Reuse cached KV states - only process scaffold tokens
+            if use_cache and self._kv_cache is not None and self._cached_prompt_length == prompt_length and not self.model.use_mlx:
+                # Reuse cached KV states for prompt + compute scaffold tokens
                 scaffold_tokens = sequence[:, prompt_length:]
+                
+                # Create attention mask for full sequence (prompt + scaffold)
+                full_attention_mask = torch.ones_like(sequence)
                 
                 # Create position IDs for scaffold tokens (continuing from prompt)
                 scaffold_position_ids = torch.arange(
-                    prompt_length, 
+                    prompt_length,
                     sequence.shape[1],
                     device=self.device
                 ).unsqueeze(0)
                 
-                # Forward with cached KV
-                outputs = self.model.base_llm(
+                # Forward with cached KV (only processes scaffold tokens)
+                outputs = self.model.get_hidden_states(
                     input_ids=scaffold_tokens,
-                    attention_mask=attention_mask,
+                    attention_mask=full_attention_mask,
                     past_key_values=self._kv_cache,
                     position_ids=scaffold_position_ids,
                     output_hidden_states=True,
                     use_cache=True
                 )
                 
-                # Get prompt hidden states from cache (need to recompute or store)
-                # For simplicity, we run full forward but this still benefits from KV cache warmup
-                outputs_full = self.model.base_llm(
-                    input_ids=sequence,
-                    attention_mask=attention_mask,
-                    output_hidden_states=True,
-                    use_cache=False
-                )
-                hidden_states = outputs_full.hidden_states[-1]
+                # Concatenate cached prompt hidden states with new scaffold hidden states
+                if hasattr(self, '_cached_prompt_hidden_states') and self._cached_prompt_hidden_states is not None:
+                    scaffold_hidden = outputs.hidden_states[-1]
+                    hidden_states = torch.cat([self._cached_prompt_hidden_states, scaffold_hidden], dim=1)
+                else:
+                    # Fallback: run full forward (cache not fully initialized)
+                    outputs = self.model.get_hidden_states(
+                        input_ids=sequence,
+                        attention_mask=attention_mask,
+                        output_hidden_states=True,
+                        use_cache=False
+                    )
+                    hidden_states = outputs.hidden_states[-1]
             else:
                 # First call or cache miss - compute full sequence and cache
-                outputs = self.model.base_llm(
+                outputs = self.model.get_hidden_states(
                     input_ids=sequence,
                     attention_mask=attention_mask,
                     output_hidden_states=True,
                     use_cache=use_cache
                 )
                 hidden_states = outputs.hidden_states[-1]
-                
-                if use_cache and hasattr(outputs, 'past_key_values') and outputs.past_key_values is not None:
-                    # Cache KV states for prompt portion only
+
+                if use_cache and hasattr(outputs, 'past_key_values') and outputs.past_key_values is not None and not self.model.use_mlx:
+                    # Cache KV states and prompt hidden states
                     self._kv_cache = outputs.past_key_values
                     self._cached_prompt_length = prompt_length
-        
+                    self._cached_prompt_hidden_states = hidden_states[:, :prompt_length, :].detach()
+
         return hidden_states
-    
+
     def _forward(
             self,
             sequence: torch.Tensor,
@@ -345,7 +357,7 @@ class FunctionCallGenerator:
             hidden_states = self._forward_with_kv_cache(
                 sequence, prompt_length, use_cache=use_kv_cache
             )
-            
+
             # Convert hidden_states to match diffusion head dtype (bfloat16)
             diffusion_head_dtype = next(self.model.diffusion_head.parameters()).dtype
             hidden_states = hidden_states.to(dtype=diffusion_head_dtype)
@@ -361,11 +373,11 @@ class FunctionCallGenerator:
             if self._cuda_graph is None:
                 # First call - setup CUDA graph
                 self._setup_cuda_graph(hidden_states, sequence, t)
-            
+
             if self._cuda_graph is not None:
                 # Check if shapes match (CUDA graphs require fixed shapes)
                 if (hidden_states.shape == self._graph_inputs['hidden_states'].shape and
-                    sequence.shape == self._graph_inputs['current_tokens'].shape):
+                        sequence.shape == self._graph_inputs['current_tokens'].shape):
                     logits = self._run_cuda_graph(hidden_states, sequence, t)
                 else:
                     # Shape mismatch - fall back to regular forward
@@ -390,6 +402,9 @@ class FunctionCallGenerator:
 
         Based on dLLM-CtrlGen generator.py lines 151-278.
         
+        Note: Inference processes one example at a time (batch_size=1), so padding/bucketing
+        is not required. CUDA graphs will capture fixed shapes from the first forward pass.
+        
         Optimizations enabled via config:
         - use_kv_cache: Cache base LLM KV states for prompt (default: True)
         - use_cuda_graph: Use CUDA graphs for diffusion head (default: False)
@@ -405,16 +420,17 @@ class FunctionCallGenerator:
             GenerationOutput with text and metadata
         """
         cfg = config or GenerationConfig()
-        
+
         validate_mask_token_consistency(
             self.model.diffusion_head.mask_token_id,
             template.mask_token_id,
             context=" in FunctionCallGenerator.generate()"
         )
-        
+
         # Clear KV cache for new prompt
         self._kv_cache = None
         self._cached_prompt_length = 0
+        self._cached_prompt_hidden_states = None
 
         with torch.no_grad():
             prompt_ids = self._encode_prompt(prompt)
@@ -438,12 +454,10 @@ class FunctionCallGenerator:
             generation_trace: List[TraceStep] = []
             mask_positions = torch.zeros_like(sequence, dtype=torch.bool)
 
-            # Schedule timesteps from 1.0 (noisy) to 0.0 (clean)
-            # For 4 steps: [1.0, 0.67, 0.33, 0.0]
-            if cfg.steps == 1:
-                timesteps = [0.0]
-            else:
-                timesteps = [1.0 - (i / (cfg.steps - 1)) for i in range(cfg.steps)]
+            # S3 strategy: Use fixed t=0 (fully denoised state) for all steps
+            # The model was trained with random t ∈ [0, 1], but inference uses t=0
+            # to get the best prediction, then uses confidence-based top-K masking
+            t = torch.zeros(sequence.shape[0], device=self.device)
 
             for step in trange(cfg.steps, desc="Diffusion steps", disable=not cfg.show_steps):
                 mask_positions.fill_(False)
@@ -455,20 +469,45 @@ class FunctionCallGenerator:
                     executed_steps = step
                     break
 
-                # Use scheduled timestep (starts at 1.0, decreases to near 0.0)
-                current_timestep = timesteps[step]
+                # Always use t=0 (S3 strategy: predict clean tokens, use confidence for masking)
                 logits = self._forward(
-                    sequence, 
-                    prompt_mask, 
-                    template, 
-                    current_timestep, 
+                    sequence,
+                    prompt_mask,
+                    template,
+                    t,
                     cfg.cfg_scale,
                     prompt_length=prompt_length,
                     use_kv_cache=cfg.use_kv_cache,
                     use_cuda_graph=cfg.use_cuda_graph
                 )
+                
+                # Debug: Check logits statistics
+                if cfg.show_steps and step == 0:
+                    mask_logits = logits[0, mask_indices]
+                    print(f"  Logits stats: mean={mask_logits.mean():.4f}, std={mask_logits.std():.4f}")
+                    print(f"  Logits range: [{mask_logits.min():.4f}, {mask_logits.max():.4f}]")
+                    print(f"  Mask token logit (ID {template.mask_token_id}): {mask_logits[0, template.mask_token_id]:.4f}")
+                
+                # Debug: Check top predictions for each masked position
+                if cfg.show_steps and step <= 1:
+                    with torch.no_grad():
+                        for i in range(min(3, len(mask_indices))):  # Show first 3 masked positions
+                            pos_logits = logits[0, mask_indices[i]]
+                            top5 = torch.topk(pos_logits, 5)
+                            top5_ids = top5.indices.cpu().tolist()
+                            top5_tokens = [self.tokenizer.decode([tid], skip_special_tokens=False) for tid in top5_ids]
+                            print(f"  Position {i} top-5: {list(zip(top5_tokens, top5_ids))}")
+                
                 logits = _apply_gumbel_noise(logits, cfg.temperature)
                 predictions = torch.argmax(logits, dim=-1)
+
+                # Debug: Check what's being predicted
+                if cfg.show_steps:
+                    mask_predictions = predictions[0, mask_indices]
+                    unique_preds = torch.unique(mask_predictions)
+                    print(f"  Unique predicted token IDs at masked positions: {unique_preds.tolist()[:10]}")
+                    if template.mask_token_id in unique_preds:
+                        print(f"  WARNING: Predicting mask token {template.mask_token_id}!")
 
                 log_probs = F.log_softmax(logits[0, mask_indices], dim=-1)
                 del logits
@@ -477,6 +516,17 @@ class FunctionCallGenerator:
                     -1, predictions[0, mask_indices].unsqueeze(-1)
                 ).squeeze(-1)
                 del log_probs
+                
+                # Penalize special tokens in confidence selection
+                # We want to prioritize revealing real content tokens over NULL/special tokens
+                # This is necessary because the model learned to confidently predict NULL tokens
+                # for padding positions in variable-length fields during training
+                special_token_mask = (predictions[0, mask_indices] >= 128000)  # Reserved special tokens start at 128000
+                if special_token_mask.any():
+                    # Apply VERY large negative penalty to special tokens
+                    # We essentially force the model to reveal non-special tokens first
+                    mask_conf = mask_conf.clone()
+                    mask_conf[special_token_mask] = -1e10  # Effectively remove from consideration
 
                 remaining = mask_indices.numel()
                 remaining_steps = cfg.steps - step
@@ -489,6 +539,14 @@ class FunctionCallGenerator:
                 del mask_conf
 
                 selected = mask_indices[topk.indices]
+                
+                # Debug: Show what tokens are being revealed
+                if cfg.show_steps:
+                    revealed_token_ids = predictions[0, selected].cpu().tolist()
+                    revealed_tokens = [self.tokenizer.decode([tid], skip_special_tokens=False) for tid in revealed_token_ids[:5]]
+                    print(f"  Revealing {len(selected)} tokens: {revealed_token_ids[:5]}")
+                    print(f"  Decoded: {revealed_tokens}")
+                
                 del mask_indices, topk
 
                 sequence[0, selected] = predictions[0, selected]
@@ -496,6 +554,11 @@ class FunctionCallGenerator:
 
                 if cfg.show_steps:
                     response_tokens_step = sequence[0, prompt_length:].cpu()
+                    
+                    # Debug: Show sequence state after update
+                    unique_in_seq = torch.unique(response_tokens_step).tolist()
+                    print(f"  Unique tokens in sequence now: {unique_in_seq[:15]}")
+                    
                     text_step = self.tokenizer.decode(
                         response_tokens_step,
                         skip_special_tokens=True,
@@ -518,7 +581,7 @@ class FunctionCallGenerator:
                 executed_steps = cfg.steps
 
             response_tokens = sequence[0, prompt_length:].cpu()
-            
+
             # Strip NULL tokens for clean output (self-adaptive masking)
             null_token_id = template.null_token_id
             response_tokens_clean = self._strip_null_tokens(response_tokens, null_token_id)
@@ -541,10 +604,11 @@ class FunctionCallGenerator:
             )
 
             del sequence, prompt_mask, mask_positions
-            
+
             # Clear internal caches
             self._kv_cache = None
             self._cached_prompt_length = 0
+            self._cached_prompt_hidden_states = None
 
             if cfg.clear_cache:
                 empty_cache(self.device)
@@ -564,7 +628,6 @@ def demo_inference():
         else "mps" if torch.backends.mps.is_available()
         else "cpu"
     )
-
     print(f"Using device: {device}")
 
     # Load config and tokenizer first
@@ -574,7 +637,7 @@ def demo_inference():
     # Inference config
     inference_cfg = config.get("inference", {})
     use_kv_cache = inference_cfg.get("use_kv_cache", True)
-    use_torch_compile = inference_cfg.get("use_torch_compile", device.type == "cuda")
+    use_torch_compile = inference_cfg.get("use_torch_compile", False)
     use_cuda_graph = inference_cfg.get("use_cuda_graph", True)
     steps = inference_cfg.get("steps", 4)
     temperature = inference_cfg.get("temperature", 0.0)
@@ -584,16 +647,10 @@ def demo_inference():
     data_cfg = config.get("data", {})
     mask_token_config = data_cfg.get("mask_token", None)
     mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
-    
+
     # Resolve NULL token for self-adaptive masking
     null_token_config = data_cfg.get("null_token", None)
-    null_token_str, null_token_id = None, None
-    try:
-        null_token_str, null_token_id = resolve_null_token(tokenizer, null_token_config)
-        print(f"Using NULL token: {null_token_str} (ID: {null_token_id})")
-    except ValueError as e:
-        print(f"Warning: NULL token not available: {e}")
-        null_token_str, null_token_id = None, None
+    null_token_str, null_token_id = resolve_null_token(tokenizer, null_token_config)
 
     print(f"Using mask token: {mask_token_str} (ID: {mask_token_id})")
     print(f"Tokenizer vocab size: {len(tokenizer)}")
@@ -602,47 +659,51 @@ def demo_inference():
     model_cfg = config.get("model", {})
     training_cfg = config.get("training", {})
     diff_cfg = config.get("diffusion", {})
+    quant_cfg = config.get("quantization", {})
     checkpoint_path = training_cfg.get("checkpoint_path", "checkpoints/best_model/model.pt")
 
-    # Initialize model with correct vocab size and config
+    quantize_enabled = quant_cfg.get("enabled", False)
+    quantize_bits = quant_cfg.get("bits", 4)
+    load_in_4bit = quantize_enabled and quantize_bits == 4
+
+    base_model_id = model_cfg.get("base_model_id", "HuggingFaceTB/SmolLM3-3B")
+    mlx_base_model_id = model_cfg.get("mlx_base_model_id", "mlx-community/SmolLM3-3B-4bit")
+    backend = model_cfg.get("backend", None)
+
     model = HybridSmolLM(
-        base_model_id=model_cfg.get("base_model_id", "HuggingFaceTB/SmolLM3-3B"),
-        load_in_4bit=model_cfg.get("load_in_4bit", False),
+        base_model_id=base_model_id,
+        mlx_base_model_id=mlx_base_model_id,
+        load_in_4bit=load_in_4bit,
         diffusion_config=diff_cfg,
-        vocab_size=len(tokenizer)
+        vocab_size=len(tokenizer),
+        backend=backend
     )
 
     # Load checkpoint if it exists
     if os.path.exists(checkpoint_path):
         print(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        
-        # Only load trainable heads (diffusion_head and router_head)
-        # Skip base_llm weights since they're frozen and loaded from pretrained model
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
         checkpoint_state = checkpoint['model_state_dict']
         model_state = model.state_dict()
-        
-        # Filter to only load trainable head weights
+
         filtered_state = {}
         skipped_keys = []
         loaded_keys = []
-        
+
         for key, value in checkpoint_state.items():
-            # Only load diffusion_head and router_head weights
             if key.startswith('diffusion_head.') or key.startswith('router_head.'):
                 if key in model_state:
-                    # Check shape compatibility
                     if model_state[key].shape == value.shape:
-                        filtered_state[key] = value
+                        filtered_state[key] = value.cpu()
                         loaded_keys.append(key)
                     else:
                         skipped_keys.append(f"{key} (shape mismatch: {model_state[key].shape} vs {value.shape})")
                 else:
                     skipped_keys.append(f"{key} (not in model)")
             else:
-                # Skip base_llm weights - they should come from pretrained model
                 skipped_keys.append(f"{key} (base_llm, skipped)")
-        
+
         if filtered_state:
             model.load_state_dict(filtered_state, strict=False)
             print(f"Loaded {len(loaded_keys)} trainable head weights from checkpoint")
@@ -650,37 +711,43 @@ def demo_inference():
                 print(f"Skipped {len(skipped_keys)} keys (base_llm or incompatible)")
         else:
             print("Warning: No compatible weights found in checkpoint, using untrained heads")
-        
+
         if 'epoch' in checkpoint:
             print(f"Checkpoint info: epoch {checkpoint['epoch']}, eval loss: {checkpoint.get('eval_loss', 'N/A')}")
     else:
         print(f"No checkpoint found at {checkpoint_path}, using untrained model")
 
-    # Move model to device and set eval mode
-    model.to(device)
+    # Set model to eval mode and configure
+    if not model.use_mlx:
+        model.to(device)
+    else:
+        # For MLX: only move PyTorch heads to device, not the MLX base model
+        model.diffusion_head.to(device)
+        model.router_head.to(device)
     model.eval()
-    model.diffusion_head.set_mask_token_id(mask_token_id)
     
+    model.diffusion_head.set_mask_token_id(mask_token_id)
+
     # Set NULL token ID if available
     if null_token_id is not None:
         model.diffusion_head.set_null_token_id(null_token_id)
 
     # Initialize generator with optimizations (from config + device defaults)
     generator = FunctionCallGenerator(
-        model, 
-        tokenizer, 
+        model,
+        tokenizer,
         device,
         use_torch_compile=use_torch_compile,
         use_cuda_graph=use_cuda_graph
     )
-    
+
     print(f"Optimizations: torch.compile={use_torch_compile}, cuda_graph={use_cuda_graph}, kv_cache={use_kv_cache}")
 
     prompt = "What's the weather in London?"
 
     fields = [
         ("location", 10),
-        ("unit", 3),
+        ("topic", 10),
     ]
 
     template = build_schema_template(
@@ -690,7 +757,7 @@ def demo_inference():
         null_token=null_token_str,
         include_codeblock=False
     )
-    
+
     validate_mask_token_consistency(
         model.diffusion_head.mask_token_id,
         template.mask_token_id,
