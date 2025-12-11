@@ -441,12 +441,26 @@ def train():
     else:
         accelerator.print("Quantization: disabled")
     
+    # Check if unsloth should be used (default: True on CUDA if available)
+    use_unsloth = model_cfg.get("use_unsloth", None)
+    if use_unsloth is None:
+        use_unsloth = torch.cuda.is_available()
+    
+    if use_unsloth:
+        accelerator.print("Unsloth: enabled (faster CUDA training/inference)")
+    else:
+        accelerator.print("Unsloth: disabled")
+    
     accelerator.print("Loading Model...")
+    enable_inference_opt = model_cfg.get("enable_unsloth_inference_opt", True)
     model = HybridSmolLM(
         base_model_id=model_cfg["base_model_id"],
         load_in_4bit=load_in_4bit,
         diffusion_config=diff_cfg,
-        vocab_size=len(tokenizer)  # Use tokenizer vocab size!
+        vocab_size=len(tokenizer),  # Use tokenizer vocab size!
+        use_unsloth=use_unsloth,
+        max_seq_length=training_cfg["max_seq_len"],
+        enable_unsloth_inference_opt=enable_inference_opt
     )
 
     # Set mask token ID in diffusion head for proper noising

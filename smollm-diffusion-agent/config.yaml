@@ -5,6 +5,8 @@ model:
   hidden_size: 2048 # Will be auto-detected but good to have default
   vocab_size: 32000
   backend: "pytorch"  # "pytorch" or "mlx"
+  use_unsloth: null  # null = auto-detect (use unsloth on CUDA if available), true/false to override
+  enable_unsloth_inference_opt: true  # Enable unsloth's for_inference() optimization (2x faster inference, safe for frozen base models)
 
 # Quantization Configuration (independent of backend)
 # This setting applies to both PyTorch and MLX backends

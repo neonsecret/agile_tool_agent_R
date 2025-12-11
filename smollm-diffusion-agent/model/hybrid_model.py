@@ -10,6 +10,13 @@ from .diffusion_head import SchemaDiffusionHead
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.device_utils import get_device, get_device_map_for_quantization
 
+_unsloth_available = False
+try:
+    from unsloth import FastLanguageModel
+    _unsloth_available = True
+except ImportError:
+    pass
+
 
 class RouterHead(nn.Module):
     def __init__(self, hidden_size, num_classes=3):
@@ -32,18 +39,20 @@ class RouterHead(nn.Module):
 
 class HybridSmolLM(nn.Module):
     def __init__(self, base_model_id="HuggingFaceTB/SmolLM3-3B", load_in_4bit=False,
-                 diffusion_config=None, vocab_size=None, backend=None, mlx_base_model_id=None):
+                 diffusion_config=None, vocab_size=None, backend=None, mlx_base_model_id=None,
+                 use_unsloth=None, max_seq_length=2048, enable_unsloth_inference_opt=True):
         super().__init__()
 
         if diffusion_config is None:
             diffusion_config = {}
 
         device = get_device()
-        use_mlx = backend.lower() == "mlx"
+        use_mlx = backend is not None and backend.lower() == "mlx"
         
         self.use_mlx = use_mlx
         self.mlx_model = None
         self.base_llm = None
+        self.use_unsloth = False
         
         if use_mlx:
             print("Using mlx")
@@ -52,7 +61,7 @@ class HybridSmolLM(nn.Module):
             if vocab_size is None:
                 vocab_size = self.mlx_config.vocab_size
         else:
-            self._init_torch_model(base_model_id, load_in_4bit, device)
+            self._init_torch_model(base_model_id, load_in_4bit, device, use_unsloth, max_seq_length)
             hidden_size = self.base_llm.config.hidden_size
             if vocab_size is None:
                 vocab_size = self.base_llm.config.vocab_size
@@ -84,33 +93,43 @@ class HybridSmolLM(nn.Module):
             return backend.lower() == "mlx"
         return platform.system() == "Darwin" and platform.machine() == "arm64" and device.type == "mps"
 
-    def _init_torch_model(self, base_model_id, load_in_4bit, device):
-        if load_in_4bit:
-            if torch.cuda.is_available():
-                bnb_config = BitsAndBytesConfig(
+    def _init_torch_model(self, base_model_id, load_in_4bit, device, use_unsloth=None, max_seq_length=2048):
+        if use_unsloth is None:
+            use_unsloth = _unsloth_available and torch.cuda.is_available()
+        
+        cuda_available = torch.cuda.is_available()
+        use_unsloth = use_unsloth and cuda_available
+        
+        if use_unsloth:
+            print("Using unsloth FastModel for faster CUDA training/inference")
+            self.base_llm, _ = FastLanguageModel.from_pretrained(
+                model_name=base_model_id,
+                max_seq_length=max_seq_length,
+                dtype=None if load_in_4bit else torch.bfloat16,
+                load_in_4bit=load_in_4bit,
+                load_in_8bit=False,
+            )
+            if enable_unsloth_inference_opt:
+                FastLanguageModel.for_inference(self.base_llm)
+                print("Unsloth inference optimizations enabled (2x faster inference)")
+            self.use_unsloth = True
+        else:
+            kwargs = {
+                "torch_dtype": torch.bfloat16,
+                "device_map": "auto" if device.type == "mps" else None
+            }
+            
+            if load_in_4bit and cuda_available:
+                kwargs["quantization_config"] = BitsAndBytesConfig(
                     load_in_4bit=True,
                     bnb_4bit_compute_dtype=torch.bfloat16,
                     bnb_4bit_use_double_quant=True,
                     bnb_4bit_quant_type="nf4"
                 )
-                device_map = get_device_map_for_quantization(torch.device("cuda"))
-                self.base_llm = AutoModelForCausalLM.from_pretrained(
-                    base_model_id,
-                    quantization_config=bnb_config,
-                    device_map=device_map
-                )
-            else:
-                self.base_llm = AutoModelForCausalLM.from_pretrained(
-                    base_model_id,
-                    torch_dtype=torch.bfloat16,
-                    device_map="auto" if device.type == "mps" else None
-                )
-        else:
-            self.base_llm = AutoModelForCausalLM.from_pretrained(
-                base_model_id,
-                torch_dtype=torch.bfloat16,
-                device_map="auto" if device.type == "mps" else None
-            )
+                kwargs["device_map"] = get_device_map_for_quantization(torch.device("cuda"))
+            
+            self.base_llm = AutoModelForCausalLM.from_pretrained(base_model_id, **kwargs)
+            self.use_unsloth = False
 
         for param in self.base_llm.parameters():
             param.requires_grad = False

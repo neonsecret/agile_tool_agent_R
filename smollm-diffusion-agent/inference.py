@@ -1046,14 +1046,27 @@ def demo_inference():
     base_model_id = model_cfg.get("base_model_id", "HuggingFaceTB/SmolLM3-3B")
     mlx_base_model_id = model_cfg.get("mlx_base_model_id", "mlx-community/SmolLM3-3B-4bit")
     backend = model_cfg.get("backend", None)
+    
+    use_unsloth = model_cfg.get("use_unsloth", None)
+    if use_unsloth is None:
+        use_unsloth = torch.cuda.is_available()
+    
+    if use_unsloth:
+        print("Unsloth: enabled (faster CUDA inference)")
 
+    max_seq_length = training_cfg.get("max_seq_len", 2048)
+    enable_inference_opt = model_cfg.get("enable_unsloth_inference_opt", True)
+    
     model = HybridSmolLM(
         base_model_id=base_model_id,
         mlx_base_model_id=mlx_base_model_id,
         load_in_4bit=load_in_4bit,
         diffusion_config=diff_cfg,
         vocab_size=len(tokenizer),
-        backend=backend
+        backend=backend,
+        use_unsloth=use_unsloth,
+        max_seq_length=max_seq_length,
+        enable_unsloth_inference_opt=enable_inference_opt
     )
 
     # Load checkpoint if it exists
