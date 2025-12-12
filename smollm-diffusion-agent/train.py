@@ -732,15 +732,21 @@ def train():
                 save_dir = f"checkpoints/best_model"
                 os.makedirs(save_dir, exist_ok=True)
                 unwrapped_model = accelerator.unwrap_model(model)
+
+                # Only save trainable parameters (diffusion_head and router_head)
+                full_state_dict = unwrapped_model.state_dict()
+                trainable_state_dict = {k: v for k, v in full_state_dict.items()
+                                       if k.startswith('diffusion_head.') or k.startswith('router_head.')}
+
                 torch.save({
                     'epoch': epoch,
-                    'model_state_dict': unwrapped_model.state_dict(),
+                    'model_state_dict': trainable_state_dict,
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'eval_loss': best_eval_loss,
                     'config': config
                 }, f"{save_dir}/model.pt")
-                accelerator.print(f"Saved best model to {save_dir}")
+                accelerator.print(f"Saved best model to {save_dir} (trainable params only)")
 
         accelerator.print("-" * 80)
 
