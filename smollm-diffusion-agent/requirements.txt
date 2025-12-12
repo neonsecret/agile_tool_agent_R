@@ -9,4 +9,6 @@ sentencepiece
 protobuf
 wandb
 hf_transfer
-unsloth[colab-new]>=2024.9
+unsloth
+xformers
+triton
