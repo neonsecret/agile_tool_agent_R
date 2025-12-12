@@ -49,7 +49,7 @@ class LogLinearNoise(nn.Module):
         return (1 - self.eps) / (1 - (1 - self.eps) * t)
 
     def total_noise(self, t):
-        """
+        r"""
         Total noise ie \int_0^t g(t) dt + g(0).
 
         Args:
