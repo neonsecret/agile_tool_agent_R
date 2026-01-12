@@ -1,14 +1,23 @@
+# Core dependencies (all platforms)
 torch>=2.0.0
 transformers>=4.45.0
 accelerate>=0.20.0
 datasets>=2.12.0
 scipy
-bitsandbytes
-deepspeed
 sentencepiece
 protobuf
 wandb
 hf_transfer
-unsloth
-xformers
-triton
+
+# CUDA-specific dependencies (install only on Linux/Windows with NVIDIA GPU)
+# On Mac, skip these or they will fail
+# bitsandbytes  # 4-bit quantization (CUDA only)
+# deepspeed     # Distributed training (primarily CUDA)
+# triton        # CUDA kernel compilation
+# xformers      # Memory-efficient attention (CUDA primary)
+
+# Optional: unsloth for faster training/inference on CUDA
+# unsloth
+
+# Note: For Mac (MPS), use standard PyTorch with bfloat16
+# Note: For MLX on Apple Silicon, see separate train_mlx.py

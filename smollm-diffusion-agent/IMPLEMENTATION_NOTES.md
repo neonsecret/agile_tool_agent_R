@@ -226,62 +226,174 @@ All borrowed code properly cited in file headers:
 4. **S3 generation from dLLM-CtrlGen**: ✅ Complete generator with top-K
 5. **Proper loss functions**: ✅ D3PM loss via training_step
 
-## Missing Features (Optional Enhancements)
+## Recent Updates (Jan 2026)
 
-These are listed in IMPLEMENTATION_ANALYSIS.md but not yet implemented:
+### Device Support & Configuration Cleanup (✅ Complete)
 
-1. **`<NULL>` token support**: For variable-length fields
-   - Would allow adaptive field lengths
-   - Current implementation uses fixed budgets per field
+**Changes:**
+1. **Removed MLX integration from main pipeline**
+   - MLX code moved to separate `train_mlx.py` (optional)
+   - Main code is now PyTorch-only (CUDA + MPS + CPU)
 
-2. **Block-wise parallel generation**: From Discrete-Diffusion-Forcing
+2. **Automatic device configuration** (`data/config_utils.py`)
+   - `validate_and_adjust_config()`: Auto-disables unsupported features per device
+   - `get_model_kwargs()`: Extracts model init kwargs from config
+   - `get_inference_kwargs()`: Extracts inference kwargs from config
+   - `print_device_capabilities()`: Shows available hardware/libraries
+
+3. **Platform support:**
+   - **CUDA** (Primary): Full speed with 4-bit quantization, unsloth, CUDA graphs
+   - **MPS** (Mac): Inference-ready, uses bfloat16, auto-disables CUDA features
+   - **CPU**: Supported but slow (testing only)
+
+4. **Config cleanup:**
+   - Removed `backend`, `mlx_base_model_id` from config.yaml
+   - Removed deprecated `use_kv_cache` setting
+   - Fixed `accelerate_config.yaml` (was forcing CPU training)
+   - Updated `requirements.txt` (CUDA-only packages now optional)
+
+5. **Simplified model initialization:**
+   ```python
+   # Old way (many parameters):
+   model = HybridSmolLM(base_model_id, mlx_base_model_id, backend, load_in_4bit, use_unsloth, ...)
+   
+   # New way (via config):
+   model_kwargs = get_model_kwargs(config, device)
+   model = HybridSmolLM(**model_kwargs)
+   ```
+
+### Implemented Features
+
+1. **`<NULL>` token support**: ✅ Complete
+   - Variable-length fields with automatic budgeting
+   - Self-adaptive masking
+
+2. **Bidirectional attention**: ✅ Complete
+   - Added `BidirectionalAttentionBlock` in diffusion head
+   - Global constraint verification for structured output
+   - Configurable via `use_bidirectional` in config
+
+3. **CUDA graph optimization**: ✅ Complete
+   - Implemented in inference.py
+   - Auto-disabled on non-CUDA devices
+   - Reduces kernel launch overhead
+
+4. **Hidden states caching**: ✅ Complete
+   - Cache base model hidden states once per generation
+   - Matches training behavior (predict from initial masked scaffold)
+
+### Missing Features (Optional Enhancements)
+
+1. **Block-wise parallel generation**: From Discrete-Diffusion-Forcing
    - Would allow parallel generation of multiple parameters
    - Current implementation is sequential
 
-3. **CUDA graph optimization**: From dInfer
-   - Would significantly speed up inference
-   - Current implementation is standard PyTorch
-
-4. **Decision Token mechanism**: From MediaTek paper
+2. **Decision Token mechanism**: From MediaTek paper
    - Explicit `<|answer|>` vs `<|use_tool|>` tokens
    - Current router head provides classification but not explicit tokens
 
-5. **Bidirectional attention from LLaDA**: From dInfer
-   - Would allow global constraint verification
-   - Current implementation uses residual blocks
-
 ## Next Steps
 
-1. **Test the implementation**:
-   - Run training on small dataset
-   - Verify diffusion loss converges
-   - Test inference pipeline
+1. **Test the implementation**: ✅ Complete
+   - ✅ Test suite passes (54 fast tests)
+   - ✅ Setup validation script works
+   - ✅ Model loads and runs forward pass on CUDA and MPS
 
 2. **Evaluate**:
-   - BFCL benchmark for function calling accuracy
+   - Run BFCL benchmark for function calling accuracy
    - Measure hallucination rate
    - Profile latency per mode
 
 3. **Optional enhancements**:
-   - Add `<NULL>` token support for variable-length fields
-   - Implement block-wise parallel generation
-   - Add CUDA graph optimization
+   - Implement block-wise parallel generation (from Discrete-Diffusion-Forcing)
+   - Add Decision Token mechanism (explicit `<|answer|>` vs `<|use_tool|>` tokens)
 
 ## File Structure
 
 ```
 smollm-diffusion-agent/
 ├── data/
-│   ├── schema.py                 # ✅ NEW: From dLLM-CtrlGen
+│   ├── schema.py                 # ✅ From dLLM-CtrlGen
 │   ├── schema_builder.py         # Pre-existing (similar to schema.py)
 │   ├── dataset_loader.py         # ✅ Updated import
-│   └── generate_scaffolds.py     # Pre-existing
+│   ├── generate_scaffolds.py     # Pre-existing
+│   ├── config_utils.py           # ✅ NEW: Device config validation
+│   ├── device_utils.py           # Device detection and utilities
+│   ├── budget_utils.py           # Field budget calculation
+│   ├── smollm3_prompting.py      # SmolLM3 chat template utilities
+│   └── utils.py                  # General utilities
 ├── model/
 │   ├── __init__.py
-│   ├── noise_schedule.py         # ✅ NEW: From mdlm (LogLinearNoise)
+│   ├── noise_schedule.py         # ✅ From mdlm (LogLinearNoise)
 │   ├── diffusion_head.py         # ✅ REWRITTEN: mdlm-style diffusion
-│   └── hybrid_model.py           # ✅ Updated: proper initialization
+│   └── hybrid_model.py           # ✅ Updated: PyTorch-only, device-aware
+├── tests/
+│   ├── test_smoke.py             # Quick sanity checks
+│   ├── test_model_components.py  # Unit tests for model parts
+│   ├── test_dataset.py           # Dataset loading and format tests
+│   ├── test_inference_pipeline.py # Inference utilities tests
+│   ├── test_smollm3_prompting.py # Template and parsing tests
+│   └── conftest.py               # Pytest configuration
 ├── inference.py                  # ✅ REWRITTEN: S3 generation loop
-├── train.py                      # ✅ Updated: set_mask_token_id
-└── IMPLEMENTATION_NOTES.md       # ✅ NEW: This file
+├── train.py                      # ✅ Updated: device validation
+├── validate_setup.py             # ✅ NEW: Setup validation script
+├── config.yaml                   # ✅ Updated: platform-agnostic
+├── accelerate_config.yaml        # ✅ Fixed: bf16, auto-detect device
+├── requirements.txt              # ✅ Updated: optional CUDA packages
+└── IMPLEMENTATION_NOTES.md       # ✅ This file
 ```
+
+## Platform Support
+
+### Supported Devices:
+
+| Device | Training | Inference | Quantization | Optimizations |
+|--------|----------|-----------|--------------|---------------|
+| **CUDA** | ✅ Fast | ✅ Fast | 4-bit (bitsandbytes) | unsloth, CUDA graphs, torch.compile |
+| **MPS (Apple Silicon)** | ⚠️ Slow | ✅ Good | ❌ (uses bfloat16) | torch.compile (2.1+) |
+| **CPU** | ❌ Very Slow | ❌ Slow | ❌ | None |
+
+### Automatic Configuration:
+
+The system automatically adjusts settings via `data/config_utils.py`:
+- Disables 4-bit quantization on MPS/CPU
+- Disables unsloth on non-CUDA devices
+- Disables CUDA graphs on MPS/CPU
+- Disables torch.compile on unsupported platforms
+
+**Usage:**
+```python
+from data.device_utils import get_device
+from data.config_utils import validate_and_adjust_config, get_model_kwargs
+
+device = get_device()
+config = validate_and_adjust_config(config, device)
+model_kwargs = get_model_kwargs(config, device)
+model = HybridSmolLM(**model_kwargs)
+```
+
+## Testing
+
+Run the test suite:
+```bash
+# Quick smoke tests
+pytest tests/test_smoke.py -v
+
+# All fast tests
+pytest tests/ -v -m "not slow"
+
+# All tests including slow ones
+pytest tests/ -v
+
+# Validate setup
+python validate_setup.py
+```
+
+**Test Coverage:**
+- ✅ Data pipeline (dataset loading, scaffolding)
+- ✅ Model components (router, diffusion head, forward pass)
+- ✅ SmolLM3 prompting (chat template, tool injection)
+- ✅ Inference pipeline (schema building, parsing)
+- ✅ Device configuration (auto-adjustment)
+
+All 54 fast tests pass on both CUDA and MPS.

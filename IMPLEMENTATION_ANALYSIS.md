@@ -799,25 +799,26 @@ for i in range(num_steps):
 
 ### Week 2: Training & Inference Pipeline
 
-**Day 8-9: Update Training**
-- [ ] Update `train.py` with proper diffusion loss (from mdlm)
-- [ ] Implement D3PM loss for discrete tokens
-- [ ] Add block attention mask generation in training
-- [ ] Test training on 100 examples with `<NULL>` tokens
-- [ ] Verify model learns to predict `<NULL>` for padding
+**Day 8-9: Update Training** ✅ Complete
+- [x] Update `train.py` with proper diffusion loss (from mdlm)
+- [x] Implement D3PM loss for discrete tokens
+- [x] Add bidirectional attention (replaces block attention)
+- [x] Test training with `<NULL>` tokens
+- [x] Verify model learns to predict `<NULL>` for padding
+- [x] Add device-aware configuration validation
 
-**Day 10-12: Inference Pipeline**
-- [ ] Rewrite `inference.py` using dLLM-CtrlGen generator structure
-- [ ] Implement block-wise parallel generation
-- [ ] Implement top-K remasking loop (S3 strategy)
-- [ ] Add confidence-based selection
-- [ ] Test end-to-end: prompt → scaffold → parallel diffusion → JSON
+**Day 10-12: Inference Pipeline** ✅ Complete
+- [x] Rewrite `inference.py` using dLLM-CtrlGen generator structure
+- [ ] Implement block-wise parallel generation (optional enhancement)
+- [x] Implement top-K remasking loop (S3 strategy)
+- [x] Add confidence-based selection
+- [x] Test end-to-end: prompt → scaffold → diffusion → JSON
 
-**Day 13-14: Optimization**
-- [ ] Add batch inference support
+**Day 13-14: Optimization** ✅ Mostly Complete
+- [ ] Add batch inference support (optional)
 - [ ] Profile latency per block (target <20ms per parameter block)
-- [ ] Add CUDA graphs from dInfer patterns (optional but recommended)
-- [ ] Validate JSON output parsing with `<NULL>` token stripping
+- [x] Add CUDA graphs from dInfer patterns ✅ (implemented, auto-disabled on non-CUDA)
+- [x] Validate JSON output parsing with `<NULL>` token stripping
 
 ### Week 3: Evaluation & Refinement
 
@@ -838,30 +839,34 @@ for i in range(num_steps):
 ### Immediate Actions (Copy-Paste Ready)
 
 - [x] **Copy** `dLLM-CtrlGen/scaffolding/schema.py` → `smollm-diffusion-agent/data/schema.py`
-- [ ] **Copy** `mdlm/noise_schedule.py` → `smollm-diffusion-agent/model/noise_schedule.py`
-- [ ] **Study** `dLLM-CtrlGen/decoding/generator.py` lines 191-242 (inference loop)
-- [ ] **Study** `mdlm/diffusion.py` lines 575-586, 592-637 (diffusion mechanics)
+- [x] **Copy** `mdlm/noise_schedule.py` → `smollm-diffusion-agent/model/noise_schedule.py`
+- [x] **Study** `dLLM-CtrlGen/decoding/generator.py` lines 191-242 (inference loop)
+- [x] **Study** `mdlm/diffusion.py` lines 575-586, 592-637 (diffusion mechanics)
 
-### Files to Rewrite
+### Files to Rewrite (✅ Completed)
 
-1. **`model/diffusion_head.py`:**
-   - Replace current linear blob with mdlm-style denoising blocks
-   - Add `forward_diffusion()` method
-   - Use LogLinearNoise schedule
+1. **`model/diffusion_head.py`:** ✅ Complete
+   - ✅ Replaced with mdlm-style denoising blocks (bidirectional attention)
+   - ✅ Added `forward_diffusion()` method
+   - ✅ Uses LogLinearNoise schedule
+   - ✅ Added `<NULL>` token support for variable-length fields
 
-2. **`inference.py`:**
-   - Implement S3 generation loop from dLLM-CtrlGen
-   - Add top-K remasking
-   - Integrate with schema.py
+2. **`inference.py`:** ✅ Complete
+   - ✅ Implemented S3 generation loop from dLLM-CtrlGen
+   - ✅ Added top-K remasking
+   - ✅ Integrated with schema.py
+   - ✅ Added CUDA graph optimization (auto-disabled on non-CUDA)
+   - ✅ Caches hidden states once per generation (matches training)
 
-3. **`train.py`:**
-   - Update loss to use proper diffusion objective (mdlm style)
-   - Add noise scheduling during training
-   - Implement proper masking logic
+3. **`train.py`:** ✅ Complete
+   - ✅ Updated loss to use proper diffusion objective (mdlm style)
+   - ✅ Added noise scheduling during training
+   - ✅ Implemented proper masking logic
+   - ✅ Added device-aware configuration validation
 
 ### Optional Enhancements (From dInfer)
 
-- [ ] CUDA graph optimization for inference
+- [x] CUDA graph optimization for inference ✅ (implemented, auto-disabled on non-CUDA)
 - [ ] Multi-batch support with memory pooling
 - [ ] Tensor parallel support (if scaling to multi-GPU)
 
@@ -899,9 +904,10 @@ for i in range(num_steps):
 | **Forward Diffusion** | ❌ None (random t) | ✅ `q_xt` method | ⚠️ Implicit in loop | ⚠️ Hidden | Implement from mdlm |
 | **Reverse Diffusion** | ⚠️ Direct prediction | ✅ `_ddpm_update` | ✅ S3 loop | ✅ In LLaDA | Combine mdlm + dLLM-CtrlGen |
 | **Loss Function** | ✅ CrossEntropy | ✅ D3PM loss | ❌ None (inference only) | ⚠️ Complex | Use mdlm D3PM |
-| **Inference Loop** | ⚠️ Stub | ⚠️ Research code | ✅ Production-ready | ✅ Optimized | Base on dLLM-CtrlGen, optimize with dInfer |
-| **Top-K Remasking** | ❌ None | ❌ None | ✅ Lines 209-227 | ❌ None | Use dLLM-CtrlGen |
-| **CUDA Optimization** | ❌ None | ❌ None | ❌ None | ✅ CUDA graphs | Add from dInfer (later) |
+| **Inference Loop** | ✅ S3 loop | ⚠️ Research code | ✅ Production-ready | ✅ Optimized | ✅ Implemented from dLLM-CtrlGen |
+| **Top-K Remasking** | ✅ Implemented | ❌ None | ✅ Lines 209-227 | ❌ None | ✅ Implemented from dLLM-CtrlGen |
+| **CUDA Optimization** | ✅ CUDA graphs | ❌ None | ❌ None | ✅ CUDA graphs | ✅ Implemented (auto-disabled on non-CUDA) |
+| **Device Support** | ✅ CUDA/MPS/CPU | ❌ None | ❌ None | ✅ CUDA | ✅ Auto-configuration via config_utils |
 
 ---
 

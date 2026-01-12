@@ -227,11 +227,9 @@ class TestHybridModelLoading:
         )
         model.diffusion_head.set_mask_token_id(mask_id)
         
-        # Move to device only if not using MLX
-        if not model.use_mlx:
-            # For MPS/CUDA, move the model
-            if device.type != "cpu":
-                model = model.to(device)
+        # Move to device (model is PyTorch only now)
+        if device.type != "cpu":
+            model = model.to(device)
         
         model.eval()
         

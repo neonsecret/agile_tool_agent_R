@@ -33,7 +33,8 @@ from data.smollm3_prompting import (
     parse_first_tool_call,
 )
 from data.budget_utils import build_fields_from_schema, print_budget_info, MIN_FIELD_BUDGET, DEFAULT_MAX_BUDGET
-from data.device_utils import empty_cache, synchronize
+from data.device_utils import empty_cache, synchronize, get_device
+from data.config_utils import validate_and_adjust_config, get_model_kwargs, get_inference_kwargs, print_device_capabilities
 
 
 def load_config(config_path="config.yaml"):
@@ -70,7 +71,6 @@ class GenerationConfig:
     use_fp16: bool = False
     clear_cache: bool = True
     show_steps: bool = False
-    use_kv_cache: bool = True
     use_cuda_graph: bool = True
 
 
@@ -133,17 +133,26 @@ class FunctionCallGenerator:
         self.model.eval()
         self.max_seq_len = max_seq_len
 
-        # KV cache storage
+        # KV cache storage (kept for future use, currently caching hidden states once)
         self._kv_cache: Optional[Tuple] = None
         self._cached_prompt_length: int = 0
         self._cached_prompt_hidden_states: Optional[torch.Tensor] = None
 
+        # Validate device-specific optimizations
+        is_cuda = device.type == "cuda"
+        is_mps = device.type == "mps"
+        
+        if use_torch_compile and not is_cuda and not is_mps:
+            print(f"Warning: torch.compile on {device.type} may not be optimized, disabling")
+            use_torch_compile = False
+        
+        if use_cuda_graph and not is_cuda:
+            use_cuda_graph = False
+
         # torch.compile optimization
-        # For MPS: check if PyTorch version supports it (2.1+)
-        # For CUDA/CPU: use if available
         self._compiled = False
         if use_torch_compile and hasattr(torch, 'compile'):
-            if self.device.type == "mps":
+            if is_mps:
                 if _can_use_torch_compile_mps(self.device):
                     self._compile_diffusion_head()
                 else:
@@ -151,7 +160,7 @@ class FunctionCallGenerator:
             else:
                 self._compile_diffusion_head()
 
-        # CUDA graph optimization
+        # CUDA graph optimization (CUDA only)
         self._cuda_graph_enabled = use_cuda_graph and _is_cuda_graph_supported(device)
         self._cuda_graph: Optional[torch.cuda.CUDAGraph] = None
         self._graph_inputs: Dict[str, torch.Tensor] = {}
@@ -162,8 +171,7 @@ class FunctionCallGenerator:
         self.MODE_TOOL = 1
         self.MODE_THINK = 2
 
-        # SmolLM3 chat template configuration:
-        # - Tool calling should not use extended thinking (docs + SmolLM3 template supports /no_think).
+        # SmolLM3 chat template configuration
         self._system_message_tool = "/no_think"
         self._system_message_chat = "/think"
 
@@ -837,25 +845,27 @@ class FunctionCallGenerator:
 
 def demo_inference():
     """Demo function showing how to use the generator with automatic budgeting."""
-    device = torch.device(
-        "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available()
-        else "cpu"
-    )
+    # Print device capabilities and get device
+    print_device_capabilities()
+    device = get_device()
     print(f"Using device: {device}")
 
-    # Load config and tokenizer first
+    # Load and validate config
     config = load_config()
+    config = validate_and_adjust_config(config, device)
+    
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM3-3B")
 
-    # Inference config
+    # Get inference kwargs from config
     inference_cfg = config.get("inference", {})
-    use_kv_cache = inference_cfg.get("use_kv_cache", True)
-    use_torch_compile = inference_cfg.get("use_torch_compile", False)
-    use_cuda_graph = inference_cfg.get("use_cuda_graph", True)
+    inference_kwargs = get_inference_kwargs(config, device)
+    
     steps = inference_cfg.get("steps", 4)
     temperature = inference_cfg.get("temperature", 0.0)
     cfg_scale = inference_cfg.get("cfg_scale", 0.0)
+    max_seq_length = inference_kwargs.get("max_seq_len", 2048)
+    use_torch_compile = inference_kwargs["use_torch_compile"]
+    use_cuda_graph = inference_kwargs["use_cuda_graph"]
 
     # Resolve mask token
     data_cfg = config.get("data", {})
@@ -875,41 +885,14 @@ def demo_inference():
     print(f"Tokenizer vocab size: {len(tokenizer)}")
 
     # Check for checkpoint
-    model_cfg = config.get("model", {})
     training_cfg = config.get("training", {})
-    diff_cfg = config.get("diffusion", {})
-    quant_cfg = config.get("quantization", {})
     checkpoint_path = training_cfg.get("checkpoint_path", "checkpoints/best_model/model.pt")
-
-    quantize_enabled = quant_cfg.get("enabled", False)
-    quantize_bits = quant_cfg.get("bits", 4)
-    load_in_4bit = quantize_enabled and quantize_bits == 4
-
-    base_model_id = model_cfg.get("base_model_id", "HuggingFaceTB/SmolLM3-3B")
-    mlx_base_model_id = model_cfg.get("mlx_base_model_id", "mlx-community/SmolLM3-3B-4bit")
-    backend = model_cfg.get("backend", None)
     
-    use_unsloth = model_cfg.get("use_unsloth", None)
-    if use_unsloth is None:
-        use_unsloth = torch.cuda.is_available()
+    # Get model kwargs using config utils
+    model_kwargs = get_model_kwargs(config, device)
+    model_kwargs['vocab_size'] = len(tokenizer)
     
-    if use_unsloth:
-        print("Unsloth: enabled (faster CUDA inference)")
-
-    max_seq_length = training_cfg.get("max_seq_len", 2048)
-    enable_inference_opt = model_cfg.get("enable_unsloth_inference_opt", True)
-    
-    model = HybridSmolLM(
-        base_model_id=base_model_id,
-        mlx_base_model_id=mlx_base_model_id,
-        load_in_4bit=load_in_4bit,
-        diffusion_config=diff_cfg,
-        vocab_size=len(tokenizer),
-        backend=backend,
-        use_unsloth=use_unsloth,
-        max_seq_length=max_seq_length,
-        enable_unsloth_inference_opt=enable_inference_opt
-    )
+    model = HybridSmolLM(**model_kwargs)
 
     # Load checkpoint if it exists
     if os.path.exists(checkpoint_path):
@@ -974,7 +957,7 @@ def demo_inference():
         max_seq_len=max_seq_length,
     )
 
-    print(f"Optimizations: torch.compile={use_torch_compile}, cuda_graph={use_cuda_graph}, kv_cache={use_kv_cache}")
+    print(f"Optimizations: torch.compile={use_torch_compile}, cuda_graph={use_cuda_graph}")
 
     prompt = "What's the weather in London?"
     
@@ -1014,7 +997,6 @@ def demo_inference():
         temperature=temperature,
         cfg_scale=cfg_scale,
         show_steps=True,
-        use_kv_cache=use_kv_cache,
         use_cuda_graph=use_cuda_graph
     )
     

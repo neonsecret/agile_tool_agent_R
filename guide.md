@@ -130,33 +130,42 @@ These papers provide the theoretical foundation for the architectural choices.
 smollm-diffusion-agent/
 ├── data/
 │   ├── generate_scaffolds.py    # Converts datasets into scaffold format
-│   └── dataset_loader.py        # HuggingFace dataset wrapper
+│   ├── dataset_loader.py        # HuggingFace dataset wrapper
+│   ├── schema.py                # Schema scaffolding (from dLLM-CtrlGen)
+│   ├── config_utils.py          # Device-aware configuration validation
+│   ├── device_utils.py          # Device detection utilities
+│   └── smollm3_prompting.py    # SmolLM3 chat template utilities
 ├── model/
 │   ├── __init__.py
 │   ├── diffusion_head.py        # Schema-constrained diffusion head
+│   ├── noise_schedule.py        # LogLinearNoise schedule (from mdlm)
 │   └── hybrid_model.py          # Wrapper combining SmolLM + Diffusion
 ├── train.py                     # Training loop with custom losses
-└── inference.py                 # AR → Scaffold → Diffusion pipeline
+├── inference.py                 # AR → Scaffold → Diffusion pipeline
+├── config.yaml                  # Platform-agnostic configuration
+└── validate_setup.py            # Setup validation script
 ```
 
 ### **Phase 1: The Wrapper Architecture**
 Create `model/hybrid_model.py`. This class wraps the frozen base model and attaches the trainable diffusion head.
 
-```python
-class HybridSmolLM(nn.Module):
-    def __init__(self):
-        # Load Frozen SmolLM3
-        self.base_llm = AutoModelForCausalLM.from_pretrained("SmolLM3-3B")
-        for param in self.base_llm.parameters(): param.requires_grad = False
-        
-        # Add Trainable Diffusion Head
-        self.diffusion_head = SchemaDiffusionHead(...)
+**Current Implementation:**
+- PyTorch-only (supports CUDA, MPS, CPU)
+- Device-aware model loading (4-bit quantization on CUDA, bfloat16 on MPS/CPU)
+- Automatic configuration validation via `data/config_utils.py`
 
-    def forward(self, inputs, scaffold_mask):
-        # Get hidden states from Base LLM
-        hidden = self.base_llm(inputs).hidden_states[-1]
-        # Pass masked positions to Diffusion Head
-        return self.diffusion_head(hidden, scaffold_mask)
+```python
+# Using config_utils for device-aware initialization:
+from data.config_utils import get_model_kwargs, validate_and_adjust_config
+from data.device_utils import get_device
+
+device = get_device()
+config = validate_and_adjust_config(config, device)
+model_kwargs = get_model_kwargs(config, device)
+model_kwargs['vocab_size'] = len(tokenizer)
+
+model = HybridSmolLM(**model_kwargs)
+# Base model is frozen, only diffusion_head and router_head are trainable
 ```
 
 ### **Phase 2: Data Pipeline (The Scaffolder)**
@@ -226,11 +235,12 @@ Based on MediaTek paper and schema scaffolding research:
 
 **Diffusion-Specific Settings:**
 
-*   **Number of Denoising Steps:** 4 for training accuracy, 2 for inference speed
-*   **Noise Schedule:** Linear (uniform masking rate across steps)
-*   **Refinement Strategy:** Conservative refinement - keep 70% of previous predictions, update 30% per step
-    *   This prevents the model from drastically changing predictions between steps
+*   **Number of Denoising Steps:** 4 for training accuracy, 2-4 for inference (configurable)
+*   **Noise Schedule:** LogLinearNoise (from mdlm) - smooth interpolation from 0 to ~1
+*   **Refinement Strategy:** Top-K remasking - keep highest confidence predictions per step
+    *   Adaptive budget calculation based on remaining masks
     *   Ensures stability in structured output generation
+*   **Hidden States Caching:** Base model hidden states cached once per generation (matches training)
 
 **Loss Function Composition:**
 
@@ -433,8 +443,10 @@ This is significantly faster than pure diffusion models (which would be 100ms+ f
     *   Estimated cost: $500-1000 on cloud GPUs
 
 *   **Inference:**
-    *   Deployable on single GPU or edge devices
-    *   Manageable memory footprint (~6-8GB for 3B model + diffusion head)
+    *   **CUDA:** Deployable on single GPU with 4-bit quantization (~3GB VRAM)
+    *   **MPS (Apple Silicon):** Works on Mac with bfloat16 (~7GB VRAM)
+    *   **CPU:** Supported but slow (testing only)
+    *   Device-specific optimizations auto-configured via `config_utils.py`
 
 **Critical Success Factors:**
 

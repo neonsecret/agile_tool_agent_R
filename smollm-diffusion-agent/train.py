@@ -1,11 +1,3 @@
-try:
-    import unsloth
-
-    UNSLOTH_AVAILABLE = True
-except ImportError:
-    UNSLOTH_AVAILABLE = False
-    unsloth = None
-
 import torch
 import yaml
 import random
@@ -18,7 +10,8 @@ from accelerate.utils import set_seed
 from tqdm.auto import tqdm
 import os
 import wandb
-from data.device_utils import empty_cache
+from data.device_utils import empty_cache, get_device
+from data.config_utils import validate_and_adjust_config, get_model_kwargs, print_device_capabilities
 from model.hybrid_model import HybridSmolLM
 from data.dataset_loader import SmartScaffoldDataset
 from data.utils import resolve_mask_token, resolve_null_token, validate_mask_token_consistency
@@ -383,6 +376,16 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
 def train():
     # Load Config
     config = load_config()
+    
+    # Print device capabilities first
+    print_device_capabilities()
+    
+    # Get device (before accelerator init)
+    device = get_device()
+    
+    # Validate and adjust config for device
+    config = validate_and_adjust_config(config, device)
+    
     training_cfg = config["training"]
     model_cfg = config["model"]
     data_cfg = config["data"]
@@ -426,48 +429,15 @@ def train():
     accelerator.print(f"Mask token: {mask_token_str} (ID: {mask_token_id})")
     accelerator.print(f"Tokenizer vocabulary size: {len(tokenizer)}")
 
-    # 3. Initialize Model with correct vocab size
-    # Determine quantization setting from unified config
-    quantize_enabled = quant_cfg.get("enabled", False)
-    quantize_bits = quant_cfg.get("bits", 4)
-
-    # For PyTorch, only 4-bit quantization is supported (and only on CUDA)
-    load_in_4bit = quantize_enabled and quantize_bits == 4
-
-    if quantize_enabled:
-        if quantize_bits == 4:
-            accelerator.print(f"Quantization: 4-bit (PyTorch bitsandbytes - CUDA only)")
-        else:
-            accelerator.print(f"Quantization: {quantize_bits}-bit not supported in PyTorch, using bfloat16 instead")
-            load_in_4bit = False
-    else:
-        accelerator.print("Quantization: disabled")
-
-    # Check if unsloth should be used (default: True on CUDA if available)
-    use_unsloth = model_cfg.get("use_unsloth", None)
-    if use_unsloth is None:
-        use_unsloth = torch.cuda.is_available()
-
-    if use_unsloth and not UNSLOTH_AVAILABLE:
-        accelerator.print("Warning: unsloth requested but not available, falling back to standard model")
-        use_unsloth = False
-
-    if use_unsloth:
-        accelerator.print("Unsloth: enabled (faster CUDA training/inference)")
-    else:
-        accelerator.print("Unsloth: disabled")
-
+    # 3. Initialize Model
     accelerator.print("Loading Model...")
-    enable_inference_opt = model_cfg.get("enable_unsloth_inference_opt", True)
-    model = HybridSmolLM(
-        base_model_id=model_cfg["base_model_id"],
-        load_in_4bit=load_in_4bit,
-        diffusion_config=diff_cfg,
-        vocab_size=len(tokenizer),  # Use tokenizer vocab size!
-        use_unsloth=use_unsloth,
-        max_seq_length=training_cfg["max_seq_len"],
-        enable_unsloth_inference_opt=enable_inference_opt
-    )
+    
+    # Get model kwargs using config utils (handles device-specific settings)
+    model_kwargs = get_model_kwargs(config, accelerator.device)
+    model_kwargs['vocab_size'] = len(tokenizer)
+    model_kwargs['diffusion_config'] = diff_cfg
+    
+    model = HybridSmolLM(**model_kwargs)
 
     # Set mask token ID in diffusion head for proper noising
     model.diffusion_head.set_mask_token_id(mask_token_id)
