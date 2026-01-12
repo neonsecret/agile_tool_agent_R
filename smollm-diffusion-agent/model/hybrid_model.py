@@ -32,10 +32,21 @@ class RouterHead(nn.Module):
         super().__init__()
         self.classifier = nn.Linear(hidden_size, num_classes)
 
-    def forward(self, hidden_states):
-        # hidden_states: [batch, seq_len, hidden]
-        # We pool the last token
-        pooled = hidden_states[:, -1, :]
+    def forward(self, hidden_states, attention_mask=None):
+        """
+        Args:
+            hidden_states: [batch, seq_len, hidden]
+            attention_mask: Optional [batch, seq_len] with 1 for valid tokens.
+        """
+        if attention_mask is None:
+            pooled = hidden_states[:, -1, :]
+            return self.classifier(pooled)
+
+        # Pool the last non-padding token per sample.
+        # attention_mask is expected to be 1 for real tokens, 0 for padding.
+        lengths = attention_mask.long().sum(dim=1).clamp(min=1) - 1
+        batch_indices = torch.arange(hidden_states.size(0), device=hidden_states.device)
+        pooled = hidden_states[batch_indices, lengths, :]
         return self.classifier(pooled)
 
 
@@ -224,7 +235,7 @@ class HybridSmolLM(nn.Module):
             outputs = self.get_hidden_states(input_ids, attention_mask)
             hidden_states = outputs.hidden_states[-1]
 
-        router_logits = self.router_head(hidden_states)
+        router_logits = self.router_head(hidden_states, attention_mask=attention_mask)
 
         device = hidden_states.device
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)

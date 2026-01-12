@@ -53,7 +53,7 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
     return start_epoch, best_eval_loss
 
 
-def build_collate_fn(bucket_sizes, max_seq_len):
+def build_collate_fn(bucket_sizes, max_seq_len, pad_token_id: int):
     """Create a collate_fn that pads to the next bucket size >= batch max length.
 
     This keeps shapes more stable for torch.compile and CUDA graphs.
@@ -80,7 +80,7 @@ def build_collate_fn(bucket_sizes, max_seq_len):
             pad_width = pad_to - t.size(0)
             return F.pad(t, (0, pad_width), value=pad_value)
 
-        input_ids = [pad_tensor(item["input_ids"], pad_value=0) for item in batch]
+        input_ids = [pad_tensor(item["input_ids"], pad_value=pad_token_id) for item in batch]
         attention_mask = [pad_tensor(item["attention_mask"], pad_value=0) for item in batch]
         scaffold_mask = [pad_tensor(item["scaffold_mask"], pad_value=0) for item in batch]
         labels = [pad_tensor(item["labels"], pad_value=-100) for item in batch]
@@ -420,14 +420,8 @@ def train():
 
     # Resolve NULL token for self-adaptive masking (variable-length fields)
     null_token_config = data_cfg.get("null_token", None)
-    null_token_str, null_token_id = None, None
-    if null_token_config is not None or data_cfg.get("use_null_token", True):
-        try:
-            null_token_str, null_token_id = resolve_null_token(tokenizer, null_token_config)
-            accelerator.print(f"NULL token: {null_token_str} (ID: {null_token_id})")
-        except ValueError as e:
-            accelerator.print(f"Warning: NULL token not available: {e}")
-            null_token_str, null_token_id = None, None
+    null_token_str, null_token_id = resolve_null_token(tokenizer, null_token_config)
+    accelerator.print(f"NULL token: {null_token_str} (ID: {null_token_id})")
 
     accelerator.print(f"Mask token: {mask_token_str} (ID: {mask_token_id})")
     accelerator.print(f"Tokenizer vocabulary size: {len(tokenizer)}")
@@ -508,6 +502,8 @@ def train():
     # 4. Setup Dataset
     accelerator.print("Loading Dataset...")
     # Load full dataset with NULL token support for automatic budgeting
+    system_message = data_cfg.get("system_message", "/no_think")
+    max_history_messages = int(data_cfg.get("max_history_messages", 12))
     full_dataset = SmartScaffoldDataset(
         tokenizer,
         limit=data_cfg["limit"],
@@ -516,7 +512,9 @@ def train():
         mask_token=mask_token_str,
         null_token=null_token_str,  # Enables self-adaptive masking
         chat_sampling_rate=data_cfg.get("chat_sampling_rate", 0.1),
-        mask_budget=data_cfg.get("mask_budget", 48)
+        mask_budget=data_cfg.get("mask_budget", 48),
+        system_message=system_message,
+        max_history_messages=max_history_messages,
     )
 
     # Split into train/eval (95/05 split)
@@ -534,14 +532,14 @@ def train():
         train_dataset,
         batch_size=training_cfg["batch_size"],
         shuffle=True,
-        collate_fn=build_collate_fn(bucket_sizes, training_cfg["max_seq_len"])
+        collate_fn=build_collate_fn(bucket_sizes, training_cfg["max_seq_len"], tokenizer.pad_token_id)
     )
 
     eval_dataloader = DataLoader(
         eval_dataset,
         batch_size=training_cfg["batch_size"],
         shuffle=False,
-        collate_fn=build_collate_fn(bucket_sizes, training_cfg["max_seq_len"])
+        collate_fn=build_collate_fn(bucket_sizes, training_cfg["max_seq_len"], tokenizer.pad_token_id)
     )
 
     # 4. Optimizer

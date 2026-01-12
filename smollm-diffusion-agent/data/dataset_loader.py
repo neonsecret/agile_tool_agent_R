@@ -1,21 +1,15 @@
-import torch
-from torch.utils.data import Dataset
-from datasets import load_dataset
 import json
-import re
 import random
-import yaml
+import re
+from typing import Any, Dict, List, Optional, Sequence
 
-from transformers import AutoTokenizer
+import torch
+from datasets import load_dataset
+from torch.utils.data import Dataset
 
-try:
-    from .schema import build_schema_template
-    from .utils import resolve_mask_token, resolve_null_token
-    from .system_prompts import get_random_system_prompt, format_system_message
-except:
-    from schema import build_schema_template
-    from utils import resolve_mask_token, resolve_null_token
-    from system_prompts import get_random_system_prompt, format_system_message
+from .schema import build_schema_template
+from .smollm3_prompting import apply_smollm3_chat_template, encode_tool_call_wrapper
+from .utils import resolve_mask_token, resolve_null_token
 
 
 # Budget configuration - matches guide.md recommendations
@@ -26,14 +20,28 @@ DEFAULT_MAX_BUDGET = 48
 
 
 class SmartScaffoldDataset(Dataset):
-    def __init__(self, tokenizer, split="train", max_seq_len=1024, max_new_tokens=256, limit=None,
-                 mask_token=None, null_token=None, chat_sampling_rate=0.1, mask_budget=48):
+    def __init__(
+        self,
+        tokenizer,
+        split: str = "train",
+        max_seq_len: int = 1024,
+        max_new_tokens: int = 256,
+        limit: Optional[int] = None,
+        mask_token: Optional[str] = None,
+        null_token: Optional[str] = None,
+        chat_sampling_rate: float = 0.1,
+        mask_budget: int = 48,
+        system_message: str = "/no_think",
+        max_history_messages: int = 12,
+    ):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.max_new_tokens = max_new_tokens
         self.limit = limit
         self.chat_sampling_rate = chat_sampling_rate
         self.mask_budget = mask_budget
+        self.system_message = system_message
+        self.max_history_messages = max_history_messages
         self.padding_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
         self.eos_token_id = tokenizer.eos_token_id
 
@@ -51,9 +59,41 @@ class SmartScaffoldDataset(Dataset):
         if null_token is not None:
             self.null_token, self.null_token_id = resolve_null_token(tokenizer, null_token)
 
-        # Load dataset
+        # Load dataset (Hermes reasoning + tool use)
         self.ds = load_dataset("interstellarninja/hermes_reasoning_tool_use", split=split)
         self.processed_examples = self._process_dataset()
+
+    def _map_role(self, role: str) -> str:
+        if role == "gpt":
+            return "assistant"
+        if role == "human":
+            return "user"
+        return role
+
+    def _build_messages(
+        self,
+        conversations: Sequence[Dict[str, Any]],
+        msg_idx: int,
+    ) -> List[Dict[str, str]]:
+        """
+        Build a SmolLM3-compatible `messages` list for tokenizer.apply_chat_template.
+
+        The returned messages ALWAYS start with a system message, and end with the
+        last message before `msg_idx` (typically a user message). We truncate older
+        history so the scaffold fits under `max_seq_len`.
+        """
+        history: List[Dict[str, str]] = [{"role": "system", "content": self.system_message}]
+
+        upto = conversations[:msg_idx]
+        mapped = [
+            {"role": self._map_role(m.get("from", "")), "content": m.get("value", "")}
+            for m in upto
+            if m.get("from") is not None and m.get("value") is not None
+        ]
+        if self.max_history_messages > 0:
+            mapped = mapped[-self.max_history_messages:]
+        history.extend(mapped)
+        return history
 
     def _process_dataset(self):
         processed = []
@@ -68,7 +108,7 @@ class SmartScaffoldDataset(Dataset):
 
             try:
                 tools_schema = json.loads(tools_schema_str)
-            except:
+            except json.JSONDecodeError:
                 failed += 1
                 continue
 
@@ -86,59 +126,26 @@ class SmartScaffoldDataset(Dataset):
             # But useful for router training later.
 
             for msg_idx, msg in enumerate(conversations):
-                if msg['from'] == 'gpt' and '<tool_call>' not in msg['value'] and random.random() < self.chat_sampling_rate:
-                    # Sample chat turns for router training (negative examples)
-                    prompt, _ = self._build_prompt_context(msg_idx, conversations, msg['value'])
-                    # Add router label 0 (Chat)
-                    processed.append({
-                        "prompt": prompt,
-                        "template": None,  # No diffusion
-                        "target_tokens_map": None,
-                        "router_label": 0
-                    })
+                if (
+                    msg.get("from") == "gpt"
+                    and "<tool_call>" not in msg.get("value", "")
+                    and random.random() < self.chat_sampling_rate
+                ):
+                    # Router-only example: conversation up to this assistant turn.
+                    messages = self._build_messages(conversations, msg_idx)
+                    processed.append(
+                        {
+                            "messages": messages,
+                            "tools_schema": tools_schema,
+                            "template": None,
+                            "target_tokens_map": None,
+                            "tool_name": None,
+                            "router_label": 0,
+                        }
+                    )
 
         print(f"Processed {len(processed)} examples, {failed} failed.")
         return processed
-
-    def _build_prompt_context(self, msg_idx, conversations, current_text):
-        """
-        Build prompt context with system prompt augmentation.
-        
-        Replaces the first system message with a random one 50% of the time,
-        or removes it 10% of the time (40% keeps original).
-        """
-        prompt = ""
-        
-        # Track if we've seen/replaced the first system message
-        replaced_system = False
-        
-        # Add conversation history
-        for i, prev_msg in enumerate(conversations[:msg_idx]):
-            role = prev_msg['from']
-            if role == 'gpt': role = 'assistant'
-            if role == 'human': role = 'user'
-            
-            # Handle first system message specially
-            if role == 'system' and not replaced_system:
-                replaced_system = True
-                
-                # System prompt augmentation: 50% replace, 10% remove, 40% keep original
-                rand = random.random()
-                if rand < 0.5:
-                    # 50%: Replace with random system prompt
-                    system_prompt = get_random_system_prompt(none_probability=0.0)  # Always return a prompt
-                    prompt += f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
-                elif rand < 0.6:
-                    # 10%: Remove system prompt entirely (skip it)
-                    pass
-                else:
-                    # 40%: Keep original system message
-                    prompt += f"<|im_start|>{role}\n{prev_msg['value']}<|im_end|>\n"
-            else:
-                # Normal message (not first system)
-                prompt += f"<|im_start|>{role}\n{prev_msg['value']}<|im_end|>\n"
-
-        return prompt, current_text
 
     def _process_tool_call(self, msg, msg_idx, conversations, tools_schema, processed):
         full_text = msg['value']
@@ -152,7 +159,7 @@ class SmartScaffoldDataset(Dataset):
 
         try:
             tool_call_json = json.loads(tool_call_json_str)
-        except:
+        except json.JSONDecodeError:
             return
 
         tool_name = tool_call_json.get("name")
@@ -162,12 +169,7 @@ class SmartScaffoldDataset(Dataset):
         if not tool_schema:
             return
 
-        # Context
-        context_text = full_text[:match.start()]
-        prompt_prefix, _ = self._build_prompt_context(msg_idx, conversations, full_text)
-
-        prompt = prompt_prefix + f"<|im_start|>assistant\n{context_text}"
-        prompt += "<|decision:use_tool|>\n" + f"<|tool_name:{tool_name}|>\n"
+        messages = self._build_messages(conversations, msg_idx)
 
         # Use Robust Schema Builder
         fields = []
@@ -210,20 +212,33 @@ class SmartScaffoldDataset(Dataset):
         if template is None or len(template.field_segments) == 0:
             return
 
-        processed.append({
-            "prompt": prompt,
-            "template": template,
-            "target_tokens_map": target_tokens_map,
-            "router_label": 1  # Tool
-        })
+        processed.append(
+            {
+                "messages": messages,
+                "tools_schema": tools_schema,
+                "tool_name": tool_name,
+                "template": template,
+                "target_tokens_map": target_tokens_map,
+                "router_label": 1,
+            }
+        )
 
     def __len__(self):
         return len(self.processed_examples)
 
     def __getitem__(self, idx):
         ex = self.processed_examples[idx]
+        tools_schema = ex.get("tools_schema")
+        messages = ex.get("messages")
+        if messages is None:
+            raise ValueError("Dataset example missing `messages` field.")
 
-        prompt_ids = self.tokenizer.encode(ex["prompt"], add_special_tokens=False)
+        prompt_ids = apply_smollm3_chat_template(
+            self.tokenizer,
+            messages=messages,
+            tools=tools_schema,
+            add_generation_prompt=True,
+        )
 
         # If no template (Chat example), return minimal dict for Router Training only
         if ex["template"] is None:
@@ -231,7 +246,7 @@ class SmartScaffoldDataset(Dataset):
             
             # Truncate if too long
             if len(input_ids) > self.max_seq_len:
-                input_ids = input_ids[:self.max_seq_len]
+                input_ids = input_ids[-self.max_seq_len:]
             
             attention_mask = torch.ones_like(input_ids)
             scaffold_mask = torch.zeros_like(input_ids, dtype=torch.bool)
@@ -245,22 +260,40 @@ class SmartScaffoldDataset(Dataset):
                 "router_label": ex["router_label"]
             }
 
+        tool_name = ex.get("tool_name")
+        if tool_name is None:
+            raise ValueError("Tool example missing `tool_name`.")
+
         template = ex["template"]
         target_map = ex["target_tokens_map"]
 
-        full_input_ids = list(prompt_ids)
-        full_input_ids.extend(template.tokens)
+        tool_call_parts = encode_tool_call_wrapper(self.tokenizer, tool_name)
+        prefix_ids = tool_call_parts.prefix_ids
+        suffix_ids = tool_call_parts.suffix_ids
 
-        scaffold_mask = [0] * len(prompt_ids)
+        tail_len = len(prefix_ids) + len(template.tokens) + len(suffix_ids)
+        if len(prompt_ids) + tail_len > self.max_seq_len:
+            keep = self.max_seq_len - tail_len
+            if keep <= 0:
+                raise ValueError(
+                    "max_seq_len is too small to fit tool_call wrapper + scaffold. "
+                    f"Need at least {tail_len} tokens, got max_seq_len={self.max_seq_len}."
+                )
+            prompt_ids = prompt_ids[-keep:]
 
-        template_mask = [0] * len(template.tokens)
+        full_input_ids = list(prompt_ids) + list(prefix_ids) + list(template.tokens) + list(suffix_ids)
+
+        scaffold_mask = [0] * len(full_input_ids)
         labels = [-100] * len(full_input_ids)
+
+        prompt_len = len(prompt_ids)
+        prefix_len = len(prefix_ids)
 
         for segment in template.field_segments:
             tgt = target_map.get(segment.name, [])
             for i, pos in enumerate(segment.value_positions):
-                template_mask[pos] = 1
-                global_pos = len(prompt_ids) + pos
+                global_pos = prompt_len + prefix_len + pos
+                scaffold_mask[global_pos] = 1
                 if i < len(tgt):
                     labels[global_pos] = tgt[i]
                 else:
@@ -270,42 +303,10 @@ class SmartScaffoldDataset(Dataset):
                         labels[global_pos] = self.null_token_id
                     else:
                         labels[global_pos] = -100  # Fallback to ignore
-
-        scaffold_mask.extend(template_mask)
-
         input_ids = torch.tensor(full_input_ids, dtype=torch.long)
         scaffold_mask_tensor = torch.tensor(scaffold_mask, dtype=torch.bool)
         labels_tensor = torch.tensor(labels, dtype=torch.long)
         attention_mask = torch.ones_like(input_ids)
-
-        if len(input_ids) > self.max_seq_len:
-            prompt_len = len(prompt_ids)
-            max_template_len = self.max_seq_len - prompt_len
-            
-            if max_template_len > 0:
-                # Preserve prompt, truncate template from end
-                input_ids = torch.cat([
-                    input_ids[:prompt_len],
-                    input_ids[prompt_len:prompt_len + max_template_len]
-                ])
-                scaffold_mask_tensor = torch.cat([
-                    scaffold_mask_tensor[:prompt_len],
-                    scaffold_mask_tensor[prompt_len:prompt_len + max_template_len]
-                ])
-                labels_tensor = torch.cat([
-                    labels_tensor[:prompt_len],
-                    labels_tensor[prompt_len:prompt_len + max_template_len]
-                ])
-                attention_mask = torch.cat([
-                    attention_mask[:prompt_len],
-                    attention_mask[prompt_len:prompt_len + max_template_len]
-                ])
-            else:
-                # Prompt is too long, truncate it (shouldn't happen normally)
-                input_ids = input_ids[:self.max_seq_len]
-                scaffold_mask_tensor = scaffold_mask_tensor[:self.max_seq_len]
-                labels_tensor = labels_tensor[:self.max_seq_len]
-                attention_mask = attention_mask[:self.max_seq_len]
 
         return {
             "input_ids": input_ids,
@@ -317,31 +318,4 @@ class SmartScaffoldDataset(Dataset):
 
 
 if __name__ == '__main__':
-    def load_config(config_path="../config.yaml"):
-        with open(config_path, "r") as f:
-            return yaml.safe_load(f)
-
-
-    config = load_config()
-    training_cfg = config["training"]
-    model_cfg = config["model"]
-    data_cfg = config["data"]
-    diff_cfg = config["diffusion"]
-    tokenizer = AutoTokenizer.from_pretrained(model_cfg["base_model_id"])
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    # Resolve mask token from config
-    mask_token_config = data_cfg.get("mask_token", None)
-    mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
-    full_dataset = SmartScaffoldDataset(
-        tokenizer,
-        limit=data_cfg["limit"],
-        max_seq_len=training_cfg["max_seq_len"],
-        max_new_tokens=training_cfg["max_new_tokens"],
-        mask_token=mask_token_str,
-        mask_budget=data_cfg.get("mask_budget", 48)
-    )
-    print(full_dataset)
-    print(next(iter(full_dataset)))
+    raise SystemExit("Run dataset tests via smollm-diffusion-agent/test_dataset.py")

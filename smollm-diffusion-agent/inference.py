@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -27,6 +27,11 @@ import yaml
 from model.hybrid_model import HybridSmolLM
 from data.schema import SchemaTemplate, build_schema_template
 from data.utils import resolve_mask_token, resolve_null_token, validate_mask_token_consistency
+from data.smollm3_prompting import (
+    apply_smollm3_chat_template,
+    encode_tool_call_wrapper,
+    parse_first_tool_call,
+)
 from data.budget_utils import build_fields_from_schema, print_budget_info, MIN_FIELD_BUDGET, DEFAULT_MAX_BUDGET
 from data.device_utils import empty_cache, synchronize
 
@@ -120,11 +125,13 @@ class FunctionCallGenerator:
             device: torch.device,
             use_torch_compile: bool = False,
             use_cuda_graph: bool = True,
+            max_seq_len: int = 2048,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self.model.eval()
+        self.max_seq_len = max_seq_len
 
         # KV cache storage
         self._kv_cache: Optional[Tuple] = None
@@ -154,6 +161,11 @@ class FunctionCallGenerator:
         self.MODE_CHAT = 0
         self.MODE_TOOL = 1
         self.MODE_THINK = 2
+
+        # SmolLM3 chat template configuration:
+        # - Tool calling should not use extended thinking (docs + SmolLM3 template supports /no_think).
+        self._system_message_tool = "/no_think"
+        self._system_message_chat = "/think"
 
     def _compile_diffusion_head(self):
         """Apply torch.compile to diffusion head for JIT optimization.
@@ -279,11 +291,73 @@ class FunctionCallGenerator:
             hidden_states = outputs.hidden_states[-1]
             
             # Router prediction
-            router_logits = self.model.router_head(hidden_states)
+            router_logits = self.model.router_head(
+                hidden_states, attention_mask=torch.ones_like(prompt_ids)
+            )
             mode = torch.argmax(router_logits, dim=-1).item()
             
             return mode
     
+    def _build_messages(self, prompt: str, system_message: str) -> List[Dict[str, str]]:
+        return [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt},
+        ]
+
+    def _generate_base(
+        self,
+        prompt: str,
+        tools: Optional[Sequence[Dict[str, Any]]] = None,
+        system_message: Optional[str] = None,
+        max_new_tokens: int = 256,
+        do_sample: bool = False,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+    ) -> Tuple[str, str]:
+        """
+        Generate using the frozen base model with SmolLM3's official chat template.
+
+        Returns:
+            (generated_text_raw, generated_text_clean)
+        """
+        if system_message is None:
+            system_message = self._system_message_chat
+
+        messages = self._build_messages(prompt, system_message=system_message)
+        prompt_ids_list = apply_smollm3_chat_template(
+            self.tokenizer,
+            messages=messages,
+            tools=tools,
+            add_generation_prompt=True,
+        )
+        prompt_ids = torch.tensor(prompt_ids_list, dtype=torch.long, device=self.device).unsqueeze(0)
+        prompt_len = prompt_ids.shape[1]
+
+        if self.model.use_mlx:
+            raise NotImplementedError("MLX inference is not implemented for base generation.")
+
+        output_ids = self.model.base_llm.generate(
+            prompt_ids,
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            temperature=temperature,
+            top_p=top_p,
+            pad_token_id=self.tokenizer.pad_token_id,
+        )
+
+        gen_ids = output_ids[0, prompt_len:]
+        generated_raw = self.tokenizer.decode(
+            gen_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+        generated_clean = self.tokenizer.decode(
+            gen_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        return generated_raw, generated_clean
+
     def generate_chat(self, prompt: str, max_new_tokens: int = 256) -> str:
         """
         Standard autoregressive generation for chat mode.
@@ -295,204 +369,48 @@ class FunctionCallGenerator:
         Returns:
             Generated response
         """
-        with torch.no_grad():
-            # Encode prompt
-            prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False, return_tensors="pt")
-            prompt_ids = prompt_ids.to(self.device)
-            
-            # Generate using base model
-            if not self.model.use_mlx:
-                output_ids = self.model.base_llm.generate(
-                    prompt_ids,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=True,
-                    temperature=0.7,
-                    top_p=0.9,
-                    pad_token_id=self.tokenizer.pad_token_id
-                )
-            else:
-                # MLX doesn't have .generate() - use forward passes
-                # For now, return a placeholder
-                return "[Chat mode not fully implemented for MLX backend]"
-            
-            # Decode response
-            response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
-            # Remove prompt from response
-            prompt_text = self.tokenizer.decode(prompt_ids[0], skip_special_tokens=True)
-            if response.startswith(prompt_text):
-                response = response[len(prompt_text):].strip()
-            
-            return response
+        raw, clean = self._generate_base(
+            prompt,
+            tools=None,
+            system_message=self._system_message_chat,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
+        )
+        del raw
+        return clean.strip()
     
     def generate_think(self, prompt: str, max_new_tokens: int = 512) -> str:
-        """
-        Autoregressive generation with Chain-of-Thought for think mode.
-        
-        Uses SmolLM3's built-in <|thinking|> capability.
-        
-        Args:
-            prompt: User query
-            max_new_tokens: Maximum tokens to generate (longer for CoT)
-        
-        Returns:
-            Generated response with thinking traces
-        """
-        with torch.no_grad():
-            # Add thinking token to prompt
-            thinking_prompt = f"{prompt}\n<|thinking|>"
-            prompt_ids = self.tokenizer.encode(thinking_prompt, add_special_tokens=False, return_tensors="pt")
-            prompt_ids = prompt_ids.to(self.device)
-            
-            # Generate using base model
-            if not self.model.use_mlx:
-                output_ids = self.model.base_llm.generate(
-                    prompt_ids,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=True,
-                    temperature=0.7,
-                    top_p=0.9,
-                    pad_token_id=self.tokenizer.pad_token_id
-                )
-            else:
-                return "[Think mode not fully implemented for MLX backend]"
-            
-            # Decode response
-            response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
-            # Remove prompt from response
-            prompt_text = self.tokenizer.decode(prompt_ids[0], skip_special_tokens=True)
-            if response.startswith(prompt_text):
-                response = response[len(prompt_text):].strip()
-            
-            return response
-    
-    def predict_decision(self, prompt: str) -> str:
-        """
-        Use AR model to generate decision token: <|decision:use_tool|> or <|decision:answer|>.
-        
-        Args:
-            prompt: User query
-        
-        Returns:
-            "use_tool" or "answer"
-        """
-        with torch.no_grad():
-            # Encode prompt with assistant start
-            decision_prompt = f"{prompt}\n<|im_start|>assistant\n"
-            prompt_ids = self.tokenizer.encode(decision_prompt, add_special_tokens=False, return_tensors="pt")
-            prompt_ids = prompt_ids.to(self.device)
-            
-            # Generate decision token (short generation)
-            if not self.model.use_mlx:
-                output_ids = self.model.base_llm.generate(
-                    prompt_ids,
-                    max_new_tokens=30,
-                    do_sample=False,  # Greedy for decision
-                    pad_token_id=self.tokenizer.pad_token_id
-                )
-            else:
-                # MLX fallback
-                return "use_tool"  # Default to tool for now
-            
-            # Decode and parse decision
-            generated = self.tokenizer.decode(output_ids[0], skip_special_tokens=False)
-            
-            if "<|decision:use_tool|>" in generated:
-                return "use_tool"
-            elif "<|decision:answer|>" in generated:
-                return "answer"
-            else:
-                # Fallback: if no clear decision, default to answer
-                return "answer"
-    
-    def predict_tool_name(self, prompt: str, tool_registry: dict) -> Optional[str]:
-        """
-        Use AR model to generate tool name: <|tool_name:function_name|>.
-        
-        Args:
-            prompt: User query
-            tool_registry: Dict of available tools {name: schema}
-        
-        Returns:
-            Tool name string, or None if parsing fails
-        """
-        with torch.no_grad():
-            # Encode prompt with decision token
-            tool_prompt = f"{prompt}\n<|im_start|>assistant\n<|decision:use_tool|>\n"
-            prompt_ids = self.tokenizer.encode(tool_prompt, add_special_tokens=False, return_tensors="pt")
-            prompt_ids = prompt_ids.to(self.device)
-            
-            # Generate tool name (short generation)
-            if not self.model.use_mlx:
-                output_ids = self.model.base_llm.generate(
-                    prompt_ids,
-                    max_new_tokens=50,
-                    do_sample=False,  # Greedy for tool selection
-                    pad_token_id=self.tokenizer.pad_token_id
-                )
-            else:
-                # MLX fallback - return first available tool
-                return list(tool_registry.keys())[0] if tool_registry else None
-            
-            # Decode and parse tool name
-            generated = self.tokenizer.decode(output_ids[0], skip_special_tokens=False)
-            
-            # Look for <|tool_name:xxx|> pattern
-            import re
-            match = re.search(r'<\|tool_name:(\w+)\|>', generated)
-            if match:
-                tool_name = match.group(1)
-                # Verify tool exists in registry
-                if tool_name in tool_registry:
-                    return tool_name
-            
-            # Fallback: try to find any tool name mentioned in generated text
-            for tool_name in tool_registry.keys():
-                if tool_name in generated.lower():
-                    return tool_name
-            
-            # Last resort: return first tool
-            return list(tool_registry.keys())[0] if tool_registry else None
-
-    def _build_messages(self, prompt: str) -> List[Dict[str, str]]:
-        """Build chat template messages matching training format.
-        
-        Training format includes:
-        - System message with full conversation
-        - Special tokens: <|decision:use_tool|>, <|tool_name:...|>
-        """
-        return [{"role": "user", "content": prompt}]
-
-    def _encode_prompt(self, prompt: str, tool_name: str = "get_weather") -> torch.Tensor:
-        """Encode prompt using format that matches training data.
-        
-        During training, prompts have this structure:
-        <|im_start|>system
-        ...system prompt...
-        <|im_end|>
-        <|im_start|>user  
-        ...user query...
-        <|im_end|>
-        <|im_start|>assistant
-        <|decision:use_tool|>
-        <|tool_name:TOOL_NAME|>
-        
-        This matches the format from dataset_loader.py lines 131-135
-        """
-        # Build structured prompt matching training format
-        system_prompt = "You are a helpful assistant with access to tools."
-        
-        structured_prompt = (
-            f"<|im_start|>system\n"
-            f"{system_prompt}<|im_end|>\n"
-            f"<|im_start|>user\n"
-            f"{prompt}<|im_end|>\n"
-            f"<|im_start|>assistant\n"
-            f"<|decision:use_tool|>\n"
-            f"<|tool_name:{tool_name}|>\n"
+        raw, clean = self._generate_base(
+            prompt,
+            tools=None,
+            system_message=self._system_message_chat,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
         )
-        
-        chat_ids = self.tokenizer.encode(structured_prompt, add_special_tokens=False)
-        return torch.tensor(chat_ids, dtype=torch.long, device=self.device).unsqueeze(0)
+        del raw
+        return clean.strip()
+    
+    def select_tool_call(
+        self, prompt: str, tool_registry: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Use SmolLM3's official tool calling template to decide whether to call a tool.
+
+        Returns parsed tool call dict (with "name" and "arguments") or None.
+        """
+        tools_list = list(tool_registry.values())
+        generated_raw, _ = self._generate_base(
+            prompt,
+            tools=tools_list,
+            system_message=self._system_message_tool,
+            max_new_tokens=256,
+            do_sample=False,
+        )
+        return parse_first_tool_call(generated_raw)
 
     def _initialise_sequence(
             self, prompt_ids: torch.Tensor, template: SchemaTemplate
@@ -507,123 +425,53 @@ class FunctionCallGenerator:
             return config.topk_remask
         return max(1, math.ceil(total_masks / config.steps))
 
-    def _forward_with_kv_cache(
-            self,
-            sequence: torch.Tensor,
-            prompt_length: int,
-            use_cache: bool = True,
-    ) -> torch.Tensor:
-        """Get hidden states using KV cache optimization.
-        
-        On first call: Compute full sequence, cache KV states for prompt portion.
-        On subsequent calls: Reuse cached KV states for prompt, only compute scaffold portion.
-        
-        Note: KV cache only works with PyTorch backend. MLX backend runs full forward each time.
-        """
-        attention_mask = torch.ones_like(sequence)
-
-        with torch.no_grad():
-            if use_cache and self._kv_cache is not None and self._cached_prompt_length == prompt_length and not self.model.use_mlx:
-                # Reuse cached KV states for prompt + compute scaffold tokens
-                scaffold_tokens = sequence[:, prompt_length:]
-                
-                # Create attention mask for full sequence (prompt + scaffold)
-                full_attention_mask = torch.ones_like(sequence)
-                
-                # Create position IDs for scaffold tokens (continuing from prompt)
-                scaffold_position_ids = torch.arange(
-                    prompt_length,
-                    sequence.shape[1],
-                    device=self.device
-                ).unsqueeze(0)
-                
-                # Forward with cached KV (only processes scaffold tokens)
-                outputs = self.model.get_hidden_states(
-                    input_ids=scaffold_tokens,
-                    attention_mask=full_attention_mask,
-                    past_key_values=self._kv_cache,
-                    position_ids=scaffold_position_ids,
-                    output_hidden_states=True,
-                    use_cache=True
-                )
-                
-                # Concatenate cached prompt hidden states with new scaffold hidden states
-                if hasattr(self, '_cached_prompt_hidden_states') and self._cached_prompt_hidden_states is not None:
-                    scaffold_hidden = outputs.hidden_states[-1]
-                    hidden_states = torch.cat([self._cached_prompt_hidden_states, scaffold_hidden], dim=1)
-                else:
-                    # Fallback: run full forward (cache not fully initialized)
-                    outputs = self.model.get_hidden_states(
-                        input_ids=sequence,
-                        attention_mask=attention_mask,
-                        output_hidden_states=True,
-                        use_cache=False
-                    )
-                    hidden_states = outputs.hidden_states[-1]
-            else:
-                # First call or cache miss - compute full sequence and cache
-                outputs = self.model.get_hidden_states(
-                    input_ids=sequence,
-                    attention_mask=attention_mask,
-                    output_hidden_states=True,
-                    use_cache=use_cache
-                )
-                hidden_states = outputs.hidden_states[-1]
-
-                if use_cache and hasattr(outputs, 'past_key_values') and outputs.past_key_values is not None and not self.model.use_mlx:
-                    # Cache KV states and prompt hidden states
-                    self._kv_cache = outputs.past_key_values
-                    self._cached_prompt_length = prompt_length
-                    self._cached_prompt_hidden_states = hidden_states[:, :prompt_length, :].detach()
-
-        return hidden_states
-
     def _forward(
             self,
             sequence: torch.Tensor,
             prompt_mask: torch.Tensor,
             template: SchemaTemplate,
-            timestep: float,
+            timestep: torch.Tensor,
             cfg_scale: float = 0.0,
             prompt_length: int = 0,
-            use_kv_cache: bool = True,
             use_cuda_graph: bool = True,
     ) -> torch.Tensor:
-        """Forward pass through the model with optimizations."""
-        with torch.no_grad():
-            # Get hidden states (with optional KV cache)
-            hidden_states = self._forward_with_kv_cache(
-                sequence, prompt_length, use_cache=use_kv_cache
-            )
+        """Forward pass through diffusion head (base hidden states are cached externally)."""
+        raise NotImplementedError("Use _predict_from_cached_hidden_states() instead.")
 
-            # Convert hidden_states to match diffusion head dtype (bfloat16)
-            diffusion_head_dtype = next(self.model.diffusion_head.parameters()).dtype
-            hidden_states = hidden_states.to(dtype=diffusion_head_dtype)
+    def _predict_from_cached_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        current_tokens: torch.Tensor,
+        t: torch.Tensor,
+        use_cuda_graph: bool,
+    ) -> torch.Tensor:
+        """
+        Predict logits using cached base hidden states.
 
-        # Convert timestep to tensor if needed
-        if isinstance(timestep, (int, float)):
-            t = torch.full((sequence.shape[0],), timestep, device=self.device, dtype=torch.float)
-        else:
-            t = timestep
+        This matches training, where the base model is run once on the masked scaffold
+        and the diffusion head uses token embeddings to reflect the current state.
+        """
+        diffusion_head_dtype = next(self.model.diffusion_head.parameters()).dtype
+        hidden_states = hidden_states.to(dtype=diffusion_head_dtype)
 
         # Use CUDA graph if enabled and available
         if use_cuda_graph and self._cuda_graph_enabled:
             if self._cuda_graph is None:
                 # First call - setup CUDA graph
-                self._setup_cuda_graph(hidden_states, sequence, t)
+                self._setup_cuda_graph(hidden_states, current_tokens, t)
 
             if self._cuda_graph is not None:
                 # Check if shapes match (CUDA graphs require fixed shapes)
                 if (hidden_states.shape == self._graph_inputs['hidden_states'].shape and
-                        sequence.shape == self._graph_inputs['current_tokens'].shape):
-                    logits = self._run_cuda_graph(hidden_states, sequence, t)
+                        current_tokens.shape == self._graph_inputs['current_tokens'].shape):
+                    logits = self._run_cuda_graph(hidden_states, current_tokens, t)
                 else:
                     # Shape mismatch - fall back to regular forward
-                    logits = self.model.diffusion_head.predict(hidden_states, sequence, t)
+                    logits = self.model.diffusion_head.predict(hidden_states, current_tokens, t)
             else:
-                logits = self.model.diffusion_head.predict(hidden_states, sequence, t)
+                logits = self.model.diffusion_head.predict(hidden_states, current_tokens, t)
         else:
-            logits = self.model.diffusion_head.predict(hidden_states, sequence, t)
+            logits = self.model.diffusion_head.predict(hidden_states, current_tokens, t)
 
         return logits
 
@@ -656,109 +504,67 @@ class FunctionCallGenerator:
         """
         cfg = config or GenerationConfig()
         
-        # Step 1: Route mode
-        if use_router:
-            mode = self.route_mode(prompt)
-            mode_name = ["chat", "tool", "think"][mode]
-            print(f"Router selected mode: {mode_name}")
-        else:
-            mode = self.MODE_TOOL
-            mode_name = "tool"
-            print("Skipping router, using tool mode")
-        
-        # Step 2: Execute based on mode
-        if mode == self.MODE_CHAT:
+        if tool_registry is None or len(tool_registry) == 0:
+            response = self.generate_chat(prompt)
+            return {"mode": "chat", "response": response, "note": "No tools provided"}
+
+        tool_call = self.select_tool_call(prompt, tool_registry)
+        if tool_call is None:
+            response = self.generate_chat(prompt)
+            return {"mode": "chat", "response": response}
+
+        tool_name = tool_call.get("name")
+        if not tool_name or tool_name not in tool_registry:
             response = self.generate_chat(prompt)
             return {
                 "mode": "chat",
-                "response": response
+                "response": response,
+                "note": f"Tool selection failed or unknown tool: {tool_name}",
             }
-        
-        elif mode == self.MODE_THINK:
-            response = self.generate_think(prompt)
-            return {
-                "mode": "think",
-                "response": response
-            }
-        
-        elif mode == self.MODE_TOOL:
-            if tool_registry is None or len(tool_registry) == 0:
-                # Fallback to chat if no tools available
-                print("No tools available, falling back to chat mode")
-                response = self.generate_chat(prompt)
-                return {
-                    "mode": "chat",
-                    "response": response,
-                    "note": "Fallback from tool mode due to no tools"
-                }
+
+        tool_schema = tool_registry[tool_name]
             
-            # Step 3a: Generate decision token
-            decision = self.predict_decision(prompt)
-            print(f"Decision: {decision}")
-            
-            if decision == "answer":
-                # Model decided not to use tool, generate direct answer
-                response = self.generate_chat(prompt)
-                return {
-                    "mode": "tool",
-                    "decision": "answer",
-                    "response": response
-                }
-            
-            # Step 3b: Generate tool name
-            tool_name = self.predict_tool_name(prompt, tool_registry)
-            print(f"Selected tool: {tool_name}")
-            
-            if tool_name is None:
-                # Failed to select tool, fallback to chat
-                print("Failed to select tool, falling back to chat")
-                response = self.generate_chat(prompt)
-                return {
-                    "mode": "tool",
-                    "decision": "use_tool",
-                    "response": response,
-                    "note": "Fallback due to tool selection failure"
-                }
-            
-            # Step 3c: Get tool schema and run diffusion
-            tool_schema = tool_registry[tool_name]
-            
-            # Build fields from schema
-            fields = build_fields_from_schema(
-                tool_schema,
-                self.tokenizer,
-                min_budget=MIN_FIELD_BUDGET,
-                max_budget=DEFAULT_MAX_BUDGET
-            )
-            
-            # Build template
-            mask_token_str = self.tokenizer.convert_ids_to_tokens([self.model.diffusion_head.mask_token_id])[0]
-            null_token_id = self.model.diffusion_head.null_token_id
-            null_token_str = self.tokenizer.convert_ids_to_tokens([null_token_id])[0] if null_token_id else None
-            
-            template = build_schema_template(
-                tokenizer=self.tokenizer,
-                fields=fields,
-                mask_token=mask_token_str,
-                null_token=null_token_str,
-                include_codeblock=False
-            )
-            
-            # Run diffusion generation
-            output = self.generate(
-                prompt=prompt,
-                template=template,
-                config=cfg,
-                tool_name=tool_name
-            )
-            
-            return {
-                "mode": "tool",
-                "decision": "use_tool",
-                "tool_name": tool_name,
-                "tool_call": output.text,
-                "steps_executed": output.steps_executed
-            }
+        fields = build_fields_from_schema(
+            tool_schema,
+            self.tokenizer,
+            min_budget=MIN_FIELD_BUDGET,
+            max_budget=DEFAULT_MAX_BUDGET,
+        )
+
+        mask_token_str = self.tokenizer.convert_ids_to_tokens(
+            [self.model.diffusion_head.mask_token_id]
+        )[0]
+        null_token_id = self.model.diffusion_head.null_token_id
+        null_token_str = (
+            self.tokenizer.convert_ids_to_tokens([null_token_id])[0]
+            if null_token_id is not None
+            else None
+        )
+
+        template = build_schema_template(
+            tokenizer=self.tokenizer,
+            fields=fields,
+            mask_token=mask_token_str,
+            null_token=null_token_str,
+            include_codeblock=False,
+        )
+
+        output = self.generate(
+            prompt=prompt,
+            template=template,
+            config=cfg,
+            tool_name=tool_name,
+            tools=list(tool_registry.values()),
+        )
+
+        parsed = parse_first_tool_call(output.text)
+        return {
+            "mode": "tool",
+            "tool_name": tool_name,
+            "tool_call": output.text,
+            "tool_call_parsed": parsed,
+            "steps_executed": output.steps_executed,
+        }
 
     def generate(
             self,
@@ -768,6 +574,7 @@ class FunctionCallGenerator:
             trace: bool = False,
             callback: Optional[Callable[[int, torch.Tensor, int], None]] = None,
             tool_name: str = "generic_tool",
+            tools: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> GenerationOutput:
         """
         Main inference loop combining AR + Scaffolding + Diffusion.
@@ -804,53 +611,88 @@ class FunctionCallGenerator:
         self._cached_prompt_length = 0
         self._cached_prompt_hidden_states = None
 
+        tool_call_parts = encode_tool_call_wrapper(self.tokenizer, tool_name)
+        prefix_ids = tool_call_parts.prefix_ids
+        suffix_ids = tool_call_parts.suffix_ids
+
+        messages = self._build_messages(prompt, system_message=self._system_message_tool)
+        prompt_ids_list = apply_smollm3_chat_template(
+            self.tokenizer,
+            messages=messages,
+            tools=tools,
+            add_generation_prompt=True,
+        )
+
+        tail_len = len(prefix_ids) + len(template.tokens) + len(suffix_ids)
+        if len(prompt_ids_list) + tail_len > self.max_seq_len:
+            # Inference should preserve tool_call + scaffold; truncate prompt from the left.
+            keep = self.max_seq_len - tail_len
+            if keep <= 0:
+                raise ValueError("Prompt too large to fit tool scaffold under max_seq_len.")
+            prompt_ids_list = prompt_ids_list[-keep:]
+
         with torch.no_grad():
-            prompt_ids = self._encode_prompt(prompt, tool_name)
-            sequence = self._initialise_sequence(prompt_ids, template)
+            prompt_ids = torch.tensor(
+                prompt_ids_list, dtype=torch.long, device=self.device
+            ).unsqueeze(0)
+            prefix = torch.tensor(prefix_ids, dtype=torch.long, device=self.device).unsqueeze(0)
+            suffix = torch.tensor(suffix_ids, dtype=torch.long, device=self.device).unsqueeze(0)
+            template_tensor = template.to_tensor(self.device).unsqueeze(0)
+            sequence = torch.cat([prompt_ids, prefix, template_tensor, suffix], dim=1)
             prompt_length = prompt_ids.shape[1]
-            del prompt_ids
+            prefix_length = prefix.shape[1]
+            del prompt_ids, prefix, suffix, template_tensor
 
             prompt_mask = torch.zeros_like(sequence, dtype=torch.bool, device=self.device)
             prompt_mask[:, :prompt_length] = True
 
-            variable_positions = [
-                prompt_length + position
-                for segment in template.field_segments
-                for position in segment.value_positions
-            ]
-            initial_variable_count = len(variable_positions)
-            del variable_positions
+            scaffold_mask = torch.zeros_like(sequence, dtype=torch.bool, device=self.device)
+            for segment in template.field_segments:
+                for pos in segment.value_positions:
+                    scaffold_mask[:, prompt_length + prefix_length + pos] = True
+            initial_variable_count = int(scaffold_mask.sum().item())
 
             budget = self._resolve_budget(cfg, initial_variable_count)
 
             generation_trace: List[TraceStep] = []
             mask_positions = torch.zeros_like(sequence, dtype=torch.bool)
 
-            # S3 strategy: Use fixed t=0 (fully denoised state) for all steps
-            # The model was trained with random t ∈ [0, 1], but inference uses t=0
-            # to get the best prediction, then uses confidence-based top-K masking
-            t = torch.zeros(sequence.shape[0], device=self.device)
+            # Cache base hidden states ONCE on the initial fully-masked scaffold (matches training).
+            attention_mask = torch.ones_like(sequence)
+            outputs = self.model.get_hidden_states(
+                input_ids=sequence,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                use_cache=False,
+            )
+            hidden_states_cached = outputs.hidden_states[-1].detach()
+            del outputs, attention_mask
 
             for step in trange(cfg.steps, desc="Diffusion steps", disable=not cfg.show_steps):
                 mask_positions.fill_(False)
                 mask_positions[sequence == template.mask_token_id] = True
-                mask_positions[:, :prompt_length] = False
+                mask_positions = mask_positions & scaffold_mask
                 mask_indices = torch.nonzero(mask_positions[0], as_tuple=False).squeeze(-1)
 
                 if mask_indices.numel() == 0:
                     executed_steps = step
                     break
 
-                # Always use t=0 (S3 strategy: predict clean tokens, use confidence for masking)
-                logits = self._forward(
+                # Set t based on current masked fraction (consistent with training noise rate).
+                remaining = int(mask_indices.numel())
+                t_val = float(remaining) / float(initial_variable_count)
+                t = torch.full(
+                    (sequence.shape[0],),
+                    t_val,
+                    device=self.device,
+                    dtype=torch.float,
+                )
+
+                logits = self._predict_from_cached_hidden_states(
+                    hidden_states_cached,
                     sequence,
-                    prompt_mask,
-                    template,
                     t,
-                    cfg.cfg_scale,
-                    prompt_length=prompt_length,
-                    use_kv_cache=cfg.use_kv_cache,
-                    use_cuda_graph=cfg.use_cuda_graph
+                    use_cuda_graph=cfg.use_cuda_graph,
                 )
                 
                 # Debug: Check logits statistics
@@ -971,7 +813,7 @@ class FunctionCallGenerator:
 
             text = self.tokenizer.decode(
                 response_tokens_clean,
-                skip_special_tokens=True,
+                skip_special_tokens=False,
                 clean_up_tokenization_spaces=False,
             )
 
@@ -1128,7 +970,8 @@ def demo_inference():
         tokenizer,
         device,
         use_torch_compile=use_torch_compile,
-        use_cuda_graph=use_cuda_graph
+        use_cuda_graph=use_cuda_graph,
+        max_seq_len=max_seq_length,
     )
 
     print(f"Optimizations: torch.compile={use_torch_compile}, cuda_graph={use_cuda_graph}, kv_cache={use_kv_cache}")
