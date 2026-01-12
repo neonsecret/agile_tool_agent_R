@@ -1,4 +1,13 @@
-import unsloth
+try:
+    import unsloth
+    from unsloth import FastLanguageModel
+
+    UNSLOTH_AVAILABLE = True
+except ImportError:
+    UNSLOTH_AVAILABLE = False
+    unsloth = None
+    FastLanguageModel = None
+
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
@@ -9,7 +18,6 @@ from .diffusion_head import SchemaDiffusionHead
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.device_utils import get_device, get_device_map_for_quantization
-from unsloth import FastLanguageModel
 
 
 class RouterHead(nn.Module):
@@ -95,7 +103,7 @@ class HybridSmolLM(nn.Module):
         if use_unsloth is None:
             use_unsloth = cuda_available
 
-        if use_unsloth:
+        if use_unsloth and UNSLOTH_AVAILABLE:
             print("Using unsloth FastModel for faster CUDA training/inference")
             self.base_llm, _ = FastLanguageModel.from_pretrained(
                 model_name=base_model_id,
@@ -108,6 +116,9 @@ class HybridSmolLM(nn.Module):
                 FastLanguageModel.for_inference(self.base_llm)
                 print("Unsloth inference optimizations enabled (2x faster inference)")
             self.use_unsloth = True
+        elif use_unsloth and not UNSLOTH_AVAILABLE:
+            print("Warning: unsloth requested but not available, falling back to standard model")
+            use_unsloth = False
         else:
             kwargs = {
                 "torch_dtype": torch.bfloat16,

@@ -1,5 +1,12 @@
+try:
+    import unsloth
+
+    UNSLOTH_AVAILABLE = True
+except ImportError:
+    UNSLOTH_AVAILABLE = False
+    unsloth = None
+
 import torch
-import unsloth
 import yaml
 import random
 from torch.utils.data import DataLoader, random_split
@@ -105,7 +112,7 @@ def evaluate(model, eval_dataloader, accelerator, train_router):
     total_router_correct = 0
     total_router_samples = 0
     num_batches = 0
-    
+
     # Track per-class router accuracy
     router_predictions = []
     router_labels_list = []
@@ -116,7 +123,7 @@ def evaluate(model, eval_dataloader, accelerator, train_router):
         for batch in eval_bar:
             # Always get router labels for accuracy tracking (independent of train_router)
             current_router_labels = batch.get("router_labels")
-            
+
             # Only pass router_labels to model if training router (affects loss computation)
             router_labels_for_loss = current_router_labels if train_router else None
 
@@ -144,7 +151,7 @@ def evaluate(model, eval_dataloader, accelerator, train_router):
                     router_preds = torch.argmax(outputs["router_logits"], dim=-1)
                     total_router_correct += (router_preds == current_router_labels).sum().item()
                     total_router_samples += current_router_labels.size(0)
-                    
+
                     # Collect for per-class analysis
                     router_predictions.extend(router_preds.cpu().tolist())
                     router_labels_list.extend(current_router_labels.cpu().tolist())
@@ -158,12 +165,12 @@ def evaluate(model, eval_dataloader, accelerator, train_router):
 
     if train_router:
         metrics["eval/router_loss"] = total_router_loss / max(num_batches, 1)
-    
+
     # Always track router accuracy if we have predictions
     if total_router_samples > 0:
         router_accuracy = total_router_correct / total_router_samples
         metrics["eval/router_accuracy"] = router_accuracy
-        
+
         # Per-class accuracy: Chat (0), Tool (1), Think (2)
         class_names = ["chat", "tool", "think"]
         for class_idx, class_name in enumerate(class_names):
@@ -173,7 +180,7 @@ def evaluate(model, eval_dataloader, accelerator, train_router):
                 class_labels = [label for label, mask in zip(router_labels_list, class_mask) if mask]
                 class_acc = sum(p == l for p, l in zip(class_preds, class_labels)) / len(class_labels)
                 metrics[f"eval/router_accuracy_{class_name}"] = class_acc
-        
+
         if accelerator.is_local_main_process:
             accelerator.print(f"Router Accuracy: {router_accuracy:.4f}")
             for class_name in class_names:
@@ -429,10 +436,10 @@ def train():
     # Determine quantization setting from unified config
     quantize_enabled = quant_cfg.get("enabled", False)
     quantize_bits = quant_cfg.get("bits", 4)
-    
+
     # For PyTorch, only 4-bit quantization is supported (and only on CUDA)
     load_in_4bit = quantize_enabled and quantize_bits == 4
-    
+
     if quantize_enabled:
         if quantize_bits == 4:
             accelerator.print(f"Quantization: 4-bit (PyTorch bitsandbytes - CUDA only)")
@@ -441,17 +448,21 @@ def train():
             load_in_4bit = False
     else:
         accelerator.print("Quantization: disabled")
-    
+
     # Check if unsloth should be used (default: True on CUDA if available)
     use_unsloth = model_cfg.get("use_unsloth", None)
     if use_unsloth is None:
         use_unsloth = torch.cuda.is_available()
-    
+
+    if use_unsloth and not UNSLOTH_AVAILABLE:
+        accelerator.print("Warning: unsloth requested but not available, falling back to standard model")
+        use_unsloth = False
+
     if use_unsloth:
         accelerator.print("Unsloth: enabled (faster CUDA training/inference)")
     else:
         accelerator.print("Unsloth: disabled")
-    
+
     accelerator.print("Loading Model...")
     enable_inference_opt = model_cfg.get("enable_unsloth_inference_opt", True)
     model = HybridSmolLM(
@@ -475,7 +486,7 @@ def train():
     if compile_cfg.get("enabled", False) and hasattr(torch, "compile"):
         compile_mode = compile_cfg.get("mode", "reduce-overhead")
         compile_fullgraph = compile_cfg.get("fullgraph", False)
-        
+
         accelerator.print(f"torch.compile enabled for training (mode={compile_mode}, fullgraph={compile_fullgraph})")
         accelerator.print("Note: for best stability, pad/bucket sequences to fixed lengths per batch.")
         try:
@@ -736,7 +747,7 @@ def train():
                 # Only save trainable parameters (diffusion_head and router_head)
                 full_state_dict = unwrapped_model.state_dict()
                 trainable_state_dict = {k: v for k, v in full_state_dict.items()
-                                       if k.startswith('diffusion_head.') or k.startswith('router_head.')}
+                                        if k.startswith('diffusion_head.') or k.startswith('router_head.')}
 
                 torch.save({
                     'epoch': epoch,
