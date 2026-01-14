@@ -268,12 +268,31 @@ class SchemaDiffusionHead(nn.Module):
         active_logits = logits[valid_mask_positions]
         active_labels = tokens[valid_mask_positions]
         
-        # Apply label smoothing to reduce overconfidence
-        loss = F.cross_entropy(
-            active_logits, 
-            active_labels,
-            label_smoothing=self.label_smoothing
-        )
+        # Apply loss weighting: reduce contribution of NULL token predictions
+        # NULL tokens are correct 70-95% of the time (padding), but we want the model
+        # to focus more on real content tokens
+        if self.null_token_id is not None and active_labels.numel() > 0:
+            # Create sample weights: 0.3 for NULL predictions, 1.0 for real tokens
+            sample_weights = torch.ones_like(active_labels, dtype=torch.float)
+            null_mask = active_labels == self.null_token_id
+            sample_weights[null_mask] = 0.3  # Reduce loss contribution from NULL tokens
+            
+            # Compute weighted cross entropy
+            # CE without reduction, then apply weights manually
+            loss_unreduced = F.cross_entropy(
+                active_logits,
+                active_labels,
+                label_smoothing=self.label_smoothing,
+                reduction='none'
+            )
+            loss = (loss_unreduced * sample_weights).sum() / sample_weights.sum()
+        else:
+            # Standard label smoothing when no NULL token
+            loss = F.cross_entropy(
+                active_logits,
+                active_labels,
+                label_smoothing=self.label_smoothing
+            )
 
         return loss
 

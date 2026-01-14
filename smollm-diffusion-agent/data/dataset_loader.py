@@ -138,7 +138,7 @@ class SmartScaffoldDataset(Dataset):
                             "messages": messages,
                             "tools_schema": tools_schema,
                             "template": None,
-                            "target_tokens_map": None,
+                        "target_tokens_map": None,
                             "tool_name": None,
                             "router_label": 0,
                         }
@@ -217,8 +217,8 @@ class SmartScaffoldDataset(Dataset):
                 "messages": messages,
                 "tools_schema": tools_schema,
                 "tool_name": tool_name,
-                "template": template,
-                "target_tokens_map": target_tokens_map,
+            "template": template,
+            "target_tokens_map": target_tokens_map,
                 "router_label": 1,
             }
         )

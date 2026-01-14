@@ -26,7 +26,7 @@ diffusion:
 training:
   batch_size: 8
   learning_rate: 1.0e-4
-  num_epochs: 4
+  num_epochs: 8
   gradient_accumulation_steps: 2
   train_router: true  # Enable router training (Chat=0, Tool=1, Think=2)
   max_seq_len: 2048  # Increased from 1024: median=1198, 90th percentile=2278
@@ -64,7 +64,7 @@ inference:
 data:
   dataset_name: "interstellarninja/hermes_reasoning_tool_use"
   limit: null # Set to null for full dataset, integer for debugging
-  mask_budget: 48
+  mask_budget: 32  # Reduced from 48 to reduce NULL token ratio in training (was 70-95% NULL)
   mask_token: null # null = use <|reserved_special_token_2|> (recommended), "eos" = use EOS, or specify token string
   null_token: null # null = use <|reserved_special_token_11|> for variable-length fields (automatic budgeting)
   system_message: "/no_think"  # SmolLM3 chat_template uses /think or /no_think in system message

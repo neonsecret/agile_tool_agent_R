@@ -1,4 +1,9 @@
 import torch
+
+try:
+    import unsloth
+except:
+    pass
 import yaml
 import random
 from torch.utils.data import DataLoader, random_split
@@ -376,16 +381,16 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
 def train():
     # Load Config
     config = load_config()
-    
+
     # Print device capabilities first
     print_device_capabilities()
-    
+
     # Get device (before accelerator init)
     device = get_device()
-    
+
     # Validate and adjust config for device
     config = validate_and_adjust_config(config, device)
-    
+
     training_cfg = config["training"]
     model_cfg = config["model"]
     data_cfg = config["data"]
@@ -431,12 +436,12 @@ def train():
 
     # 3. Initialize Model
     accelerator.print("Loading Model...")
-    
+
     # Get model kwargs using config utils (handles device-specific settings)
     model_kwargs = get_model_kwargs(config, accelerator.device)
     model_kwargs['vocab_size'] = len(tokenizer)
     model_kwargs['diffusion_config'] = diff_cfg
-    
+
     model = HybridSmolLM(**model_kwargs)
 
     # Set mask token ID in diffusion head for proper noising

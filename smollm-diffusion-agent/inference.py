@@ -341,8 +341,8 @@ class FunctionCallGenerator:
         prompt_ids = torch.tensor(prompt_ids_list, dtype=torch.long, device=self.device).unsqueeze(0)
         prompt_len = prompt_ids.shape[1]
 
-        if self.model.use_mlx:
-            raise NotImplementedError("MLX inference is not implemented for base generation.")
+        if self.model.use_unsloth:
+            raise NotImplementedError("Unsloth inference is not implemented for base generation.")
 
         output_ids = self.model.base_llm.generate(
             prompt_ids,
@@ -703,6 +703,14 @@ class FunctionCallGenerator:
                     use_cuda_graph=cfg.use_cuda_graph,
                 )
                 
+                # CRITICAL FIX: Prevent NULL token from being predicted at masked positions
+                # NULL tokens should only exist in pre-generated padding, not be predicted
+                if template.null_token_id is not None:
+                    logits[:, :, template.null_token_id] = -float('inf')
+                
+                # Also prevent mask token from being predicted (it's an input marker, not output)
+                logits[:, :, template.mask_token_id] = -float('inf')
+                
                 # Debug: Check logits statistics
                 if cfg.show_steps and step == 0:
                     mask_logits = logits[0, mask_indices]
@@ -933,12 +941,7 @@ def demo_inference():
         print(f"No checkpoint found at {checkpoint_path}, using untrained model")
 
     # Set model to eval mode and configure
-    if not model.use_mlx:
-        model.to(device)
-    else:
-        # For MLX: only move PyTorch heads to device, not the MLX base model
-        model.diffusion_head.to(device)
-        model.router_head.to(device)
+    model.to(device)
     model.eval()
     
     model.diffusion_head.set_mask_token_id(mask_token_id)
