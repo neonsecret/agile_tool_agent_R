@@ -20,6 +20,13 @@ from data.config_utils import validate_and_adjust_config, get_model_kwargs, prin
 from model.hybrid_model import HybridSmolLM
 from data.dataset_loader import SmartScaffoldDataset
 from data.utils import resolve_mask_token, resolve_null_token, validate_mask_token_consistency
+from data.metrics import (
+    calculate_null_token_metrics,
+    calculate_field_level_metrics,
+    calculate_parse_metrics,
+    calculate_scaffold_metrics,
+    extract_tool_call_json
+)
 
 
 def load_config(config_path="config.yaml"):
@@ -90,47 +97,36 @@ def build_collate_fn(bucket_sizes, max_seq_len, pad_token_id: int):
             "labels": torch.stack(labels, dim=0),
         }
 
-        if "router_label" in batch[0]:
-            router_labels = torch.tensor(
-                [item["router_label"] for item in batch], dtype=torch.long
-            )
-            batch_dict["router_labels"] = router_labels
-
         return batch_dict
 
     return collate_fn
 
 
-def evaluate(model, eval_dataloader, accelerator, train_router):
-    """Evaluate the model on validation set"""
+def evaluate(model, eval_dataloader, accelerator, null_token_id=None, return_logits=True):
+    """Evaluate the model on validation set with enhanced metrics."""
     model.eval()
     total_loss = 0
     total_diffusion_loss = 0
-    total_router_loss = 0
-    total_router_correct = 0
-    total_router_samples = 0
     num_batches = 0
-
-    # Track per-class router accuracy
-    router_predictions = []
-    router_labels_list = []
+    
+    # Enhanced metrics tracking
+    all_predictions = []
+    all_labels = []
+    all_mask_positions = []
+    scaffold_sizes = []
+    mask_counts = []
+    null_counts = []
 
     eval_bar = tqdm(eval_dataloader, desc="Evaluating", disable=not accelerator.is_local_main_process)
 
     with torch.no_grad():
         for batch in eval_bar:
-            # Always get router labels for accuracy tracking (independent of train_router)
-            current_router_labels = batch.get("router_labels")
-
-            # Only pass router_labels to model if training router (affects loss computation)
-            router_labels_for_loss = current_router_labels if train_router else None
-
             outputs = model(
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
                 labels=batch["labels"],
                 scaffold_mask=batch["scaffold_mask"],
-                router_labels=router_labels_for_loss
+                return_logits=return_logits,
             )
 
             if outputs["loss"] is not None:
@@ -140,51 +136,57 @@ def evaluate(model, eval_dataloader, accelerator, train_router):
                 losses_detail = outputs.get("losses", {})
                 if "diffusion" in losses_detail:
                     total_diffusion_loss += losses_detail["diffusion"].item()
-                if "router" in losses_detail:
-                    total_router_loss += losses_detail["router"].item()
-
-                # Calculate router accuracy ALWAYS (independent of train_router flag)
-                # This lets us monitor router even if we're not training it yet
-                if "router_logits" in outputs and current_router_labels is not None:
-                    router_preds = torch.argmax(outputs["router_logits"], dim=-1)
-                    total_router_correct += (router_preds == current_router_labels).sum().item()
-                    total_router_samples += current_router_labels.size(0)
-
-                    # Collect for per-class analysis
-                    router_predictions.extend(router_preds.cpu().tolist())
-                    router_labels_list.extend(current_router_labels.cpu().tolist())
+            
+            # Collect predictions for metrics
+            if "logits" in outputs:
+                logits = outputs["logits"]
+                predictions = torch.argmax(logits, dim=-1)
+                
+                # Store for metrics calculation
+                all_predictions.append(predictions.cpu())
+                all_labels.append(batch["labels"].cpu())
+                all_mask_positions.append(batch["scaffold_mask"].cpu())
+                
+                # Scaffold statistics
+                for i in range(batch["scaffold_mask"].size(0)):
+                    scaffold_mask = batch["scaffold_mask"][i]
+                    labels = batch["labels"][i]
+                    
+                    scaffold_size = scaffold_mask.sum().item()
+                    scaffold_sizes.append(scaffold_size)
+                    mask_counts.append(scaffold_size)
+                    
+                    if null_token_id is not None:
+                        null_count = ((labels == null_token_id) & scaffold_mask).sum().item()
+                        null_counts.append(null_count)
 
     model.train()
 
+    # Calculate base metrics
     metrics = {
         "eval/total_loss": total_loss / max(num_batches, 1),
         "eval/diffusion_loss": total_diffusion_loss / max(num_batches, 1),
     }
-
-    if train_router:
-        metrics["eval/router_loss"] = total_router_loss / max(num_batches, 1)
-
-    # Always track router accuracy if we have predictions
-    if total_router_samples > 0:
-        router_accuracy = total_router_correct / total_router_samples
-        metrics["eval/router_accuracy"] = router_accuracy
-
-        # Per-class accuracy: Chat (0), Tool (1), Think (2)
-        class_names = ["chat", "tool", "think"]
-        for class_idx, class_name in enumerate(class_names):
-            class_mask = [label == class_idx for label in router_labels_list]
-            if sum(class_mask) > 0:
-                class_preds = [pred for pred, mask in zip(router_predictions, class_mask) if mask]
-                class_labels = [label for label, mask in zip(router_labels_list, class_mask) if mask]
-                class_acc = sum(p == l for p, l in zip(class_preds, class_labels)) / len(class_labels)
-                metrics[f"eval/router_accuracy_{class_name}"] = class_acc
-
-        if accelerator.is_local_main_process:
-            accelerator.print(f"Router Accuracy: {router_accuracy:.4f}")
-            for class_name in class_names:
-                key = f"eval/router_accuracy_{class_name}"
-                if key in metrics:
-                    accelerator.print(f"  {class_name.capitalize()}: {metrics[key]:.4f}")
+    
+    # Calculate NULL token metrics if we have data
+    if all_predictions and null_token_id is not None:
+        predictions_cat = torch.cat(all_predictions, dim=0)
+        labels_cat = torch.cat(all_labels, dim=0)
+        mask_positions_cat = torch.cat(all_mask_positions, dim=0)
+        
+        null_metrics = calculate_null_token_metrics(
+            predictions_cat, labels_cat, mask_positions_cat, null_token_id
+        )
+        for key, value in null_metrics.items():
+            metrics[f"eval/{key}"] = value
+    
+    # Calculate scaffold metrics
+    if scaffold_sizes:
+        scaffold_metrics = calculate_scaffold_metrics(
+            scaffold_sizes, mask_counts, null_counts if null_counts else [0] * len(mask_counts)
+        )
+        for key, value in scaffold_metrics.items():
+            metrics[f"eval/{key}"] = value
 
     return metrics
 
@@ -474,6 +476,8 @@ def train():
         except Exception as e:
             accelerator.print(f"torch.compile failed, falling back to eager: {e}")
 
+    logits_for_metrics = training_cfg.get("logits_for_metrics", True)
+
     # 4. Setup Dataset
     accelerator.print("Loading Dataset...")
     # Load full dataset with NULL token support for automatic budgeting
@@ -490,6 +494,7 @@ def train():
         mask_budget=data_cfg.get("mask_budget", 48),
         system_message=system_message,
         max_history_messages=max_history_messages,
+        data_config=config,
     )
 
     # Split into train/eval (95/05 split)
@@ -518,12 +523,9 @@ def train():
     )
 
     # 4. Optimizer
-    train_router = training_cfg["train_router"]
-    if train_router:
-        params_to_optimize = list(model.diffusion_head.parameters()) + list(model.router_head.parameters())
-    else:
-        params_to_optimize = list(model.diffusion_head.parameters())
-
+    # Only optimize diffusion head parameters
+    params_to_optimize = list(model.diffusion_head.parameters())
+    
     optimizer = AdamW(params_to_optimize, lr=float(training_cfg["learning_rate"]))
 
     # 5. Learning Rate Scheduler (Cosine with Warmup)
@@ -571,7 +573,6 @@ def train():
         # Training epoch
         epoch_loss = 0
         epoch_diffusion_loss = 0
-        epoch_router_loss = 0
         num_batches = 0
 
         progress_bar = tqdm(
@@ -586,14 +587,12 @@ def train():
                 torch.compiler.cudagraph_mark_step_begin()
 
             with accelerator.accumulate(model):
-                current_router_labels = batch.get("router_labels") if train_router else None
-
                 outputs = model(
                     input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
                     labels=batch["labels"],
                     scaffold_mask=batch["scaffold_mask"],
-                    router_labels=current_router_labels
+                    return_logits=logits_for_metrics,
                 )
 
                 loss = outputs["loss"]
@@ -609,8 +608,6 @@ def train():
                 num_batches += 1
                 if "diffusion" in losses_detail:
                     epoch_diffusion_loss += losses_detail["diffusion"].item()
-                if "router" in losses_detail:
-                    epoch_router_loss += losses_detail["router"].item()
 
                 # Update progress bar
                 progress_bar.set_postfix({
@@ -622,6 +619,21 @@ def train():
                 logs = {"train/total_loss": loss_val, "train/step": global_step}
                 for k, v in losses_detail.items():
                     logs[f"train/{k}_loss"] = v.item() if torch.is_tensor(v) else v
+                
+                # Add NULL token metrics every 50 steps
+                if global_step % 50 == 0 and "logits" in outputs:
+                    with torch.no_grad():
+                        logits = outputs["logits"]
+                        predictions = torch.argmax(logits, dim=-1)
+                        
+                        null_metrics = calculate_null_token_metrics(
+                            predictions, 
+                            batch["labels"], 
+                            batch["scaffold_mask"],
+                            null_token_id
+                        )
+                        for key, value in null_metrics.items():
+                            logs[f"train/{key}"] = value
 
                 accelerator.log(logs, step=global_step)
 
@@ -678,22 +690,20 @@ def train():
         accelerator.print(f"\nEpoch {epoch + 1} Summary:")
         accelerator.print(f"  Avg Train Loss: {avg_epoch_loss:.4f}")
         accelerator.print(f"  Avg Diffusion Loss: {avg_diffusion_loss:.4f}")
-        if train_router and epoch_router_loss > 0:
-            avg_router_loss = epoch_router_loss / max(num_batches, 1)
-            accelerator.print(f"  Avg Router Loss: {avg_router_loss:.4f}")
 
         # Evaluation
         accelerator.print("\nRunning evaluation...")
-        eval_metrics = evaluate(model, eval_dataloader, accelerator, train_router)
+        eval_metrics = evaluate(
+            model,
+            eval_dataloader,
+            accelerator,
+            null_token_id=null_token_id,
+            return_logits=logits_for_metrics,
+        )
 
         accelerator.print(f"Eval Results:")
         accelerator.print(f"  Eval Loss: {eval_metrics['eval/total_loss']:.4f}")
         accelerator.print(f"  Eval Diffusion Loss: {eval_metrics['eval/diffusion_loss']:.4f}")
-        if train_router:
-            if 'eval/router_loss' in eval_metrics:
-                accelerator.print(f"  Eval Router Loss: {eval_metrics['eval/router_loss']:.4f}")
-            if 'eval/router_accuracy' in eval_metrics:
-                accelerator.print(f"  Eval Router Accuracy: {eval_metrics['eval/router_accuracy']:.2%}")
 
         # Log epoch metrics
         epoch_metrics = {
@@ -701,8 +711,6 @@ def train():
             "train/epoch_loss": avg_epoch_loss,
             "train/epoch_diffusion_loss": avg_diffusion_loss,
         }
-        if train_router and epoch_router_loss > 0:
-            epoch_metrics["train/epoch_router_loss"] = avg_router_loss
 
         epoch_metrics.update(eval_metrics)
         accelerator.log(epoch_metrics, step=global_step)
@@ -717,10 +725,10 @@ def train():
                 os.makedirs(save_dir, exist_ok=True)
                 unwrapped_model = accelerator.unwrap_model(model)
 
-                # Only save trainable parameters (diffusion_head and router_head)
+                # Only save trainable parameters (diffusion_head)
                 full_state_dict = unwrapped_model.state_dict()
                 trainable_state_dict = {k: v for k, v in full_state_dict.items()
-                                        if k.startswith('diffusion_head.') or k.startswith('router_head.')}
+                                        if k.startswith('diffusion_head.')}
 
                 torch.save({
                     'epoch': epoch,

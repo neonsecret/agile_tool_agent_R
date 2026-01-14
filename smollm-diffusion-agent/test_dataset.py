@@ -35,7 +35,7 @@ def test_dataset_structure(dataset, tokenizer, num_samples=10):
     for i in range(min(num_samples, len(dataset))):
         sample = dataset[i]
         
-        required_keys = ["input_ids", "attention_mask", "scaffold_mask", "labels", "router_label"]
+        required_keys = ["input_ids", "attention_mask", "scaffold_mask", "labels", "is_tool"]
         missing_keys = [k for k in required_keys if k not in sample]
         if missing_keys:
             errors.append(f"Sample {i}: Missing keys: {missing_keys}")
@@ -69,8 +69,8 @@ def test_dataset_structure(dataset, tokenizer, num_samples=10):
         if not isinstance(labels, torch.Tensor):
             errors.append(f"Sample {i}: labels is not a tensor")
         
-        if not isinstance(sample["router_label"], (int, torch.Tensor)):
-            errors.append(f"Sample {i}: router_label is not int or tensor")
+        if not isinstance(sample["is_tool"], (int, torch.Tensor)):
+            errors.append(f"Sample {i}: is_tool is not int or tensor")
     
     if errors:
         print(f"\n❌ Found {len(errors)} errors:")
@@ -118,9 +118,9 @@ def test_mask_token_consistency(dataset, tokenizer, mask_token_id, num_samples=1
                     f"scaffold_mask=True but no mask token"
                 )
         
-        if scaffold_mask.sum() == 0 and sample["router_label"] == 1:
+        if scaffold_mask.sum() == 0 and sample["is_tool"]:
             warnings.append(
-                f"Sample {i}: Tool call (router_label=1) but no scaffold_mask positions"
+                f"Sample {i}: Tool call (is_tool=1) but no scaffold_mask positions"
             )
     
     if errors:
@@ -228,7 +228,7 @@ def show_examples(dataset, tokenizer, mask_token_id, num_examples=3):
         labels = sample["labels"]
         
         print(f"\n--- Example {i+1} ---")
-        print(f"Router label: {sample['router_label']}")
+        print(f"Is tool: {sample['is_tool']}")
         print(f"Sequence length: {len(input_ids)}")
         print(f"Scaffold mask positions: {scaffold_mask.sum().item()}")
         print(f"Valid labels: {(labels != -100).sum().item()}")
@@ -269,14 +269,14 @@ def debug_model_input_output(dataset, tokenizer, mask_token_id, model, num_examp
         attention_mask = sample["attention_mask"].unsqueeze(0).to(device)
         scaffold_mask = sample["scaffold_mask"].unsqueeze(0).to(device)
         labels = sample["labels"].unsqueeze(0).to(device)
-        router_label = sample["router_label"]
+        is_tool = sample["is_tool"]
         
         print(f"\n{'='*80}")
         print(f"EXAMPLE {i+1}")
         print(f"{'='*80}")
         
         print(f"\n1. DATASET OUTPUT:")
-        print(f"   Router label: {router_label} ({'Chat' if router_label == 0 else 'Tool Call'})")
+        print(f"   Is tool: {is_tool} ({'Tool Call' if is_tool else 'Chat'})")
         print(f"   Sequence length: {input_ids.shape[1]}")
         print(f"   Scaffold mask positions: {scaffold_mask.sum().item()}")
         print(f"   Valid labels (non -100): {(labels != -100).sum().item()}")
@@ -430,7 +430,7 @@ def debug_model_input_output(dataset, tokenizer, mask_token_id, model, num_examp
 
 
 def test_chat_examples(dataset, num_samples=10):
-    """Test that chat examples (router_label=0) have no scaffold_mask."""
+    """Test that chat examples (is_tool=0) have no scaffold_mask."""
     print("\n" + "=" * 80)
     print("Testing Chat Examples")
     print("=" * 80)
@@ -441,21 +441,21 @@ def test_chat_examples(dataset, num_samples=10):
     
     for i in range(min(num_samples, len(dataset))):
         sample = dataset[i]
-        router_label = sample["router_label"]
+        is_tool = sample["is_tool"]
         scaffold_mask = sample["scaffold_mask"]
         
-        if router_label == 0:
+        if not is_tool:
             chat_count += 1
             if scaffold_mask.sum() > 0:
                 errors.append(
-                    f"Sample {i}: Chat example (router_label=0) but has "
+                    f"Sample {i}: Chat example (is_tool=0) but has "
                     f"{scaffold_mask.sum().item()} scaffold_mask positions"
                 )
         else:
             tool_count += 1
     
-    print(f"Chat examples (router_label=0): {chat_count}")
-    print(f"Tool examples (router_label=1): {tool_count}")
+    print(f"Chat examples (is_tool=0): {chat_count}")
+    print(f"Tool examples (is_tool=1): {tool_count}")
     
     if errors:
         print(f"\n❌ Found {len(errors)} errors:")

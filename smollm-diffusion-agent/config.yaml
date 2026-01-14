@@ -17,7 +17,7 @@ quantization:
 diffusion:
   num_steps: 4
   hidden_dim: 2048 # Should match base model hidden_size usually
-  num_layers: 2
+  num_layers: 4    # Increased from 2 for better pattern learning
   num_heads: 8
   label_smoothing: 0.1  # Reduces overconfidence, improves generalization
   use_bidirectional: true  # Use bidirectional attention for global constraint verification
@@ -28,12 +28,12 @@ training:
   learning_rate: 1.0e-4
   num_epochs: 8
   gradient_accumulation_steps: 2
-  train_router: true  # Enable router training (Chat=0, Tool=1, Think=2)
   max_seq_len: 2048  # Increased from 1024: median=1198, 90th percentile=2278
   max_new_tokens: 256
   seed: 42
   use_wandb: true
   wandb_project: "smollm-diffusion-agent"
+  logits_for_metrics: true
   resume_from_checkpoint: false
   checkpoint_path: "checkpoints/best_model/model.pt"
   eval_every_n_steps: 1000  # Run functional evaluation every N steps
@@ -62,13 +62,26 @@ inference:
 
 # Data Configuration
 data:
-  dataset_name: "interstellarninja/hermes_reasoning_tool_use"
-  limit: null # Set to null for full dataset, integer for debugging
+  # Single dataset mode (backwards compatible):
+  # dataset_name: "interstellarninja/hermes_reasoning_tool_use"
+  
+  # Multi-dataset mode (recommended):
+  datasets:
+    - name: "interstellarninja/hermes_reasoning_tool_use"
+      split: "train"
+      weight: 1.0  # Use full dataset
+      limit: null
+    - name: "Salesforce/xlam-function-calling-60k"
+      split: "train"
+      weight: 1.0  # Use full dataset
+      limit: null
+  
+  limit: null # Global limit (overrides individual dataset limits if set)
   mask_budget: 32  # Reduced from 48 to reduce NULL token ratio in training (was 70-95% NULL)
   mask_token: null # null = use <|reserved_special_token_2|> (recommended), "eos" = use EOS, or specify token string
   null_token: null # null = use <|reserved_special_token_11|> for variable-length fields (automatic budgeting)
   system_message: "/no_think"  # SmolLM3 chat_template uses /think or /no_think in system message
   max_history_messages: 12     # Keep last N chat messages before the tool call to fit max_seq_len
-  chat_sampling_rate: 0.1  # Sampling rate for chat examples (router_label=0). 0.1 = 10% of chat turns
+  chat_sampling_rate: 0.1  # Sampling rate for chat examples (non-tool calls). 0.1 = 10% of chat turns
   bucket_sizes: [512, 1024, 1536, 2048]  # Fixed buckets for padding/compile stability
 

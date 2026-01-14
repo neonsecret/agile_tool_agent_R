@@ -74,10 +74,10 @@ class TestBaseModelToolGeneration:
         reconstruct just the prompt (without the tool call answer),
         and verify the base model generates a tool call.
         """
-        # Find a tool example
+        # Find a tool example (processed examples have tool_name and template, not is_tool)
         tool_example = None
         for ex in dataset_examples:
-            if ex["router_label"] == 1 and ex["tools_schema"]:
+            if ex.get("tool_name") and ex.get("tools_schema"):
                 tool_example = ex
                 break
         
@@ -156,7 +156,7 @@ class TestBaseModelToolGeneration:
     def test_model_generates_multiple_tool_calls(self, tokenizer, base_model, dataset_examples):
         """Test on multiple examples to ensure consistency."""
         
-        tool_examples = [ex for ex in dataset_examples if ex["router_label"] == 1 and ex["tools_schema"]][:3]
+        tool_examples = [ex for ex in dataset_examples if ex.get("tool_name") and ex.get("tools_schema")][:3]
         
         if len(tool_examples) < 2:
             pytest.skip("Not enough tool examples in dataset")

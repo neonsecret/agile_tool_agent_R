@@ -440,7 +440,7 @@ class FunctionCallGenerator:
             num_steps: Diffusion denoising steps (2-4 recommended)
         """
         with torch.no_grad():
-            # 1. AR Phase: Get function name (simplified - in reality this comes from router)
+            # 1. AR Phase: Get function name (from base model's native tool calling)
             function_name = function_schema["name"]
 
             # 2. Build Scaffold (Python - deterministic)

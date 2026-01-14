@@ -106,11 +106,9 @@ def _apply_gumbel_noise(logits: torch.Tensor, temperature: float) -> torch.Tenso
 class FunctionCallGenerator:
     """Runs the S3 denoising loop with top-K remasking.
     
-    Now includes full pipeline:
-    - Router mode selection (Chat/Think/Tool)
-    - Decision token generation (use_tool/answer)
-    - Function name generation (AR)
-    - Diffusion parameter filling (existing S3 strategy)
+    Pipeline:
+    - Function name generation (AR from base model)
+    - Diffusion parameter filling (S3 strategy)
     
     Optimizations:
     - KV cache reuse: Caches base LLM KV states for prompt, reuses across diffusion steps
@@ -275,37 +273,6 @@ class FunctionCallGenerator:
         mask = tokens != null_token_id
         return tokens[mask]
     
-    def route_mode(self, prompt: str) -> int:
-        """
-        Use router head to classify mode: Chat (0), Tool (1), or Think (2).
-        
-        Args:
-            prompt: User query
-        
-        Returns:
-            Mode index: 0=Chat, 1=Tool, 2=Think
-        """
-        with torch.no_grad():
-            # Encode prompt
-            prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False, return_tensors="pt")
-            prompt_ids = prompt_ids.to(self.device)
-            
-            # Get hidden states from base model
-            outputs = self.model.get_hidden_states(
-                input_ids=prompt_ids,
-                attention_mask=torch.ones_like(prompt_ids),
-                output_hidden_states=True
-            )
-            hidden_states = outputs.hidden_states[-1]
-            
-            # Router prediction
-            router_logits = self.model.router_head(
-                hidden_states, attention_mask=torch.ones_like(prompt_ids)
-            )
-            mode = torch.argmax(router_logits, dim=-1).item()
-            
-            return mode
-    
     def _build_messages(self, prompt: str, system_message: str) -> List[Dict[str, str]]:
         return [
             {"role": "system", "content": system_message},
@@ -324,7 +291,7 @@ class FunctionCallGenerator:
     ) -> Tuple[str, str]:
         """
         Generate using the frozen base model with SmolLM3's official chat template.
-
+        
         Returns:
             (generated_text_raw, generated_text_clean)
         """
@@ -381,10 +348,10 @@ class FunctionCallGenerator:
             prompt,
             tools=None,
             system_message=self._system_message_chat,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.9,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9,
         )
         del raw
         return clean.strip()
@@ -488,24 +455,21 @@ class FunctionCallGenerator:
             prompt: str,
             tool_registry: Optional[dict] = None,
             config: Optional[GenerationConfig] = None,
-            use_router: bool = True,
     ) -> Dict[str, any]:
         """
-        Complete unified inference pipeline with routing.
+        Complete unified inference pipeline.
         
         Flow:
-        1. Router classifies mode (Chat/Think/Tool)
+        1. Base model decides whether to use tool (via native tool calling)
         2. If Tool mode:
-           a. Generate decision token (use_tool/answer)
-           b. Generate function name
-           c. Run diffusion for parameters
-        3. If Chat/Think: Use AR generation
+           a. Base model generates tool name
+           b. Run diffusion for parameters
+        3. If no tools: Use AR generation
         
         Args:
             prompt: User query
             tool_registry: Dict of available tools {name: schema}
             config: Generation configuration
-            use_router: Whether to use router (False = skip to tool mode for testing)
         
         Returns:
             Dict with 'mode', 'response', and optional 'tool_call' info
@@ -529,16 +493,16 @@ class FunctionCallGenerator:
                 "response": response,
                 "note": f"Tool selection failed or unknown tool: {tool_name}",
             }
-
+        
         tool_schema = tool_registry[tool_name]
-            
+        
         fields = build_fields_from_schema(
             tool_schema,
             self.tokenizer,
             min_budget=MIN_FIELD_BUDGET,
             max_budget=DEFAULT_MAX_BUDGET,
         )
-
+        
         mask_token_str = self.tokenizer.convert_ids_to_tokens(
             [self.model.diffusion_head.mask_token_id]
         )[0]
@@ -548,7 +512,7 @@ class FunctionCallGenerator:
             if null_token_id is not None
             else None
         )
-
+        
         template = build_schema_template(
             tokenizer=self.tokenizer,
             fields=fields,
@@ -556,7 +520,7 @@ class FunctionCallGenerator:
             null_token=null_token_str,
             include_codeblock=False,
         )
-
+        
         output = self.generate(
             prompt=prompt,
             template=template,
@@ -564,7 +528,7 @@ class FunctionCallGenerator:
             tool_name=tool_name,
             tools=list(tool_registry.values()),
         )
-
+        
         parsed = parse_first_tool_call(output.text)
         return {
             "mode": "tool",
@@ -703,13 +667,11 @@ class FunctionCallGenerator:
                     use_cuda_graph=cfg.use_cuda_graph,
                 )
                 
-                # CRITICAL FIX: Prevent NULL token from being predicted at masked positions
-                # NULL tokens should only exist in pre-generated padding, not be predicted
-                if template.null_token_id is not None:
-                    logits[:, :, template.null_token_id] = -float('inf')
-                
-                # Also prevent mask token from being predicted (it's an input marker, not output)
+                # Prevent mask token from being predicted (it's an input marker, not output)
                 logits[:, :, template.mask_token_id] = -float('inf')
+                
+                # NOTE: We do NOT block NULL tokens - the model learned to predict them
+                # for unused slots, and they get stripped in _strip_null_tokens() after generation
                 
                 # Debug: Check logits statistics
                 if cfg.show_steps and step == 0:
@@ -747,16 +709,10 @@ class FunctionCallGenerator:
                 ).squeeze(-1)
                 del log_probs
                 
-                # Penalize special tokens in confidence selection
-                # We want to prioritize revealing real content tokens over NULL/special tokens
-                # This is necessary because the model learned to confidently predict NULL tokens
-                # for padding positions in variable-length fields during training
-                special_token_mask = (predictions[0, mask_indices] >= 128000)  # Reserved special tokens start at 128000
-                if special_token_mask.any():
-                    # Apply VERY large negative penalty to special tokens
-                    # We essentially force the model to reveal non-special tokens first
-                    mask_conf = mask_conf.clone()
-                    mask_conf[special_token_mask] = -1e10  # Effectively remove from consideration
+                # NOTE: We don't penalize NULL tokens in confidence selection anymore.
+                # The model learned to predict NULL for unused slots, which is correct.
+                # NULL tokens get stripped from output in _strip_null_tokens().
+                # Penalizing NULL would force incorrect non-NULL predictions to be revealed.
 
                 remaining = mask_indices.numel()
                 remaining_steps = cfg.steps - step
@@ -895,7 +851,7 @@ def demo_inference():
     # Check for checkpoint
     training_cfg = config.get("training", {})
     checkpoint_path = training_cfg.get("checkpoint_path", "checkpoints/best_model/model.pt")
-    
+
     # Get model kwargs using config utils
     model_kwargs = get_model_kwargs(config, device)
     model_kwargs['vocab_size'] = len(tokenizer)
@@ -915,7 +871,7 @@ def demo_inference():
         loaded_keys = []
 
         for key, value in checkpoint_state.items():
-            if key.startswith('diffusion_head.') or key.startswith('router_head.'):
+            if key.startswith('diffusion_head.'):
                 if key in model_state:
                     if model_state[key].shape == value.shape:
                         filtered_state[key] = value.cpu()
@@ -924,6 +880,8 @@ def demo_inference():
                         skipped_keys.append(f"{key} (shape mismatch: {model_state[key].shape} vs {value.shape})")
                 else:
                     skipped_keys.append(f"{key} (not in model)")
+            elif key.startswith('router_head.'):
+                skipped_keys.append(f"{key} (router removed)")
             else:
                 skipped_keys.append(f"{key} (base_llm, skipped)")
 
@@ -1012,7 +970,6 @@ def demo_inference():
         prompt=prompt,
         tool_registry=tool_registry,
         config=config,
-        use_router=True  # Enable full routing
     )
     
     print(f"\n{'='*80}")

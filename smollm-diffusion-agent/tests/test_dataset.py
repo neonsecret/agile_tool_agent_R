@@ -66,7 +66,7 @@ class TestDatasetLoading:
         assert "attention_mask" in item
         assert "scaffold_mask" in item
         assert "labels" in item
-        assert "router_label" in item
+        assert "is_tool" in item
         
         assert isinstance(item["input_ids"], torch.Tensor)
         assert item["input_ids"].dtype == torch.long
@@ -106,11 +106,11 @@ class TestScaffoldMask:
             null_token=null_str,
         )
         
-        # Find a tool call example (router_label=1)
+        # Find a tool call example (is_tool=True)
         tool_example = None
         for i in range(len(dataset)):
             item = dataset[i]
-            if item["router_label"] == 1:
+            if item["is_tool"]:
                 tool_example = item
                 break
         
@@ -145,7 +145,7 @@ class TestScaffoldMask:
         tool_example = None
         for i in range(len(dataset)):
             item = dataset[i]
-            if item["router_label"] == 1:
+            if item["is_tool"]:
                 tool_example = item
                 break
         
@@ -183,11 +183,11 @@ class TestChatVsToolExamples:
             chat_sampling_rate=0.5,
         )
         
-        # Find a chat example (router_label=0)
+        # Find a chat example (is_tool=False)
         chat_example = None
         for i in range(len(dataset)):
             item = dataset[i]
-            if item["router_label"] == 0:
+            if item["is_tool"] == False:
                 chat_example = item
                 break
         
@@ -214,7 +214,7 @@ class TestChatVsToolExamples:
         tool_example = None
         for i in range(len(dataset)):
             item = dataset[i]
-            if item["router_label"] == 1:
+            if item["is_tool"]:
                 tool_example = item
                 break
         
@@ -244,7 +244,7 @@ class TestTruncation:
         
         for i in range(min(10, len(dataset))):
             item = dataset[i]
-            if item["router_label"] == 1:  # Tool example
+            if item["is_tool"]:  # Tool example
                 input_ids = item["input_ids"]
                 scaffold_mask = item["scaffold_mask"]
                 
@@ -273,7 +273,7 @@ class TestToolCallWrapper:
         tool_example = None
         for i in range(len(dataset)):
             item = dataset[i]
-            if item["router_label"] == 1:
+            if item["is_tool"]:
                 tool_example = item
                 break
         

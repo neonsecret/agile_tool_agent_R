@@ -47,15 +47,8 @@ class TestDataPipeline:
             null_token=null_str,
         )
         
-        # Get a tool example
-        tool_example = None
-        for i in range(len(dataset)):
-            item = dataset[i]
-            if item["router_label"] == 1:
-                tool_example = item
-                break
-        
-        assert tool_example is not None, "No tool examples found"
+        # Get first tool example (all examples are tool examples now)
+        tool_example = dataset[0]
         
         # Verify structure
         assert tool_example["input_ids"].shape[0] <= 1024
@@ -86,17 +79,15 @@ class TestDataPipeline:
             null_token=null_str,
         )
         
-        for i in range(len(dataset)):
-            item = dataset[i]
-            if item["router_label"] == 1:
-                text = tokenizer.decode(item["input_ids"], skip_special_tokens=False)
-                
-                # Should contain SmolLM3's tool call format
-                assert "<tool_call>" in text
-                assert "</tool_call>" in text
-                assert '"name":' in text
-                assert '"arguments":' in text
-                break
+        # All examples are tool examples now
+        item = dataset[0]
+        text = tokenizer.decode(item["input_ids"], skip_special_tokens=False)
+        
+        # Should contain SmolLM3's tool call format
+        assert "<tool_call>" in text
+        assert "</tool_call>" in text
+        assert '"name":' in text
+        assert '"arguments":' in text
 
 
 class TestSmolLM3Compatibility:
@@ -144,21 +135,6 @@ class TestSmolLM3Compatibility:
 
 class TestModelComponents:
     """Test that model components initialize and forward correctly."""
-
-    def test_router_head(self, tokenizer):
-        from model.hybrid_model import RouterHead
-        
-        device = torch.device("cpu")  # Use CPU for speed
-        hidden_size = 3072
-        router = RouterHead(hidden_size, num_classes=3).to(device)
-        
-        hidden_states = torch.randn(2, 10, hidden_size)
-        attention_mask = torch.ones(2, 10, dtype=torch.long)
-        
-        logits = router(hidden_states, attention_mask)
-        
-        assert logits.shape == (2, 3)
-        assert not torch.isnan(logits).any()
 
     def test_diffusion_head(self, tokenizer, mask_and_null):
         from model.diffusion_head import SchemaDiffusionHead

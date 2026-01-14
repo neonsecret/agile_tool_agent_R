@@ -50,18 +50,17 @@ These papers provide the theoretical foundation for the architectural choices.
 ## 3. The Architecture: "LaFuNC" (Latent Function Calling)
 
 ### **The Flow**
-1.  **Input:** User Query + Context.
-2.  **Stage 1: Mode Router (AR Head)**
-    *   Predicts: `<|chat|>`, `<|think|>`, or `<|tool|>`.
-    *   Latency: <10ms.
-    *   **Architecture:** Lightweight 3-way classifier using a simple linear layer on top of the base model's hidden states. Takes the last token representation and maps to three mode classes.
+1.  **Input:** User Query + Context + Available Tools.
+2.  **Stage 1: Mode Decision (Base Model)**
+    *   The frozen base model decides whether to use a tool or respond with chat.
+    *   Uses SmolLM3's native tool-calling protocol (tools injected via chat template).
+    *   **Note:** We originally planned a separate Router Head classifier, but decided against it because the frozen base model already handles mode selection well through its native tool-calling capability. Training an extra head would add complexity without clear benefit.
 3.  **Stage 2: Execution (Mode Dependent)**
-    *   **If Chat:** Standard AR generation.
-    *   **If Think:** AR generation with `<|thinking|>` traces (CoT).
+    *   **If Chat:** Standard AR generation from base model.
     *   **If Tool:**
-        *   **A. Decision:** AR Model predicts function name (e.g., `get_weather`).
+        *   **A. Tool Selection:** Base model generates function name via `<tool_call>` format.
         *   **B. Scaffold (Python):** Python script looks up schema and builds template: `{"loc": "<MASK>", "unit": "<MASK>"}`.
-        *   **C. Diffusion (Head):** Model predicts *only* the masked tokens (2-4 steps).
+        *   **C. Diffusion (Head):** Trained diffusion head fills *only* the masked tokens (2-4 steps).
 
 ### **Detailed Execution Flow: The "Handshake" Between Components**
 
@@ -106,10 +105,11 @@ These papers provide the theoretical foundation for the architectural choices.
 
 | Component | Type | Function | Training |
 | :--- | :--- | :--- | :--- |
-| **Base Model** | SmolLM3-3B | Understands context, routing, reasoning. | **FROZEN** (mostly) |
-| **Router Head** | Linear Layer | Classifies Chat vs. Tool vs. Think. | Train from scratch |
+| **Base Model** | SmolLM3-3B | Understands context, decides tool vs chat, generates tool names. | **FROZEN** |
 | **Diffusion Head** | MLP/Transformer | Fills `<MASK>` slots in scaffolds. | Train from scratch |
 | **Python Logic** | Script | Deterministically builds JSON structure. | Deterministic Code |
+
+**Note:** Router Head was removed from the architecture. The frozen base model's native tool-calling capability (via SmolLM3's chat template with tool injection) handles mode selection, eliminating the need for a separate classifier.
 
 ---
 
@@ -165,7 +165,7 @@ model_kwargs = get_model_kwargs(config, device)
 model_kwargs['vocab_size'] = len(tokenizer)
 
 model = HybridSmolLM(**model_kwargs)
-# Base model is frozen, only diffusion_head and router_head are trainable
+# Base model is frozen, only diffusion_head is trainable
 ```
 
 ### **Phase 2: Data Pipeline (The Scaffolder)**
@@ -288,7 +288,7 @@ Target metrics to define SOTA status for a 3B model:
 | **BFCL (AST)** | 82-87% | Structural accuracy (should be high due to scaffolding). MediaTek achieved 85.25% with 7B model. |
 | **Relevance Detection** | 65-75% | Ability to know *when* to use a tool (via Decision Token). MediaTek achieved 65.42%. |
 | **Hallucination Rate** | <8% | Greatly reduced by schema constraints. |
-| **Latency** | <100ms | Avg combined latency (Router + AR + Diffusion). |
+| **Latency** | <100ms | Avg combined latency (AR tool selection + Diffusion). |
 
 **Latency Breakdown by Mode:**
 
@@ -297,12 +297,10 @@ Different modes have different performance characteristics. The overall latency 
 | Mode | Latency Target | Distribution | Notes |
 | :--- | :--- | :--- | :--- |
 | **Chat** | 20-30ms | 60% of queries | Standard AR generation, fastest path |
-| **Think** | 80-120ms | 15% of queries | Longer due to reasoning trace generation |
-| **Tool** | 60-100ms | 25% of queries | Includes decision (10ms) + diffusion (50-90ms) |
-| **Router** | <10ms | 100% of queries | Lightweight classifier overhead |
+| **Tool** | 60-100ms | 40% of queries | Includes tool selection + diffusion (50-90ms) |
 
 **Weighted Average Latency:**
-- (0.60 × 25ms) + (0.15 × 100ms) + (0.25 × 80ms) + 10ms = **45-55ms** typical per request
+- (0.60 × 25ms) + (0.40 × 80ms) = **47ms** typical per request
 
 This is significantly faster than pure diffusion models (which would be 100ms+ for all queries) while maintaining quality.
 
@@ -458,7 +456,7 @@ This is significantly faster than pure diffusion models (which would be 100ms+ f
 
 **Biggest Risks:**
 
-*   **Debugging complexity:** Combining three components (router, AR, diffusion) makes debugging painful. Start simple - get each mode working independently before integration.
+*   **Debugging complexity:** Combining base model tool selection with diffusion requires careful alignment. Test each component independently before integration.
 *   **Data quality:** Garbage in, garbage out. Invest time in high-quality synthetic reasoning data generation.
 *   **Overfitting on function calling:** Monitor conversational quality (MT-Bench) throughout training to catch catastrophic forgetting early.
 

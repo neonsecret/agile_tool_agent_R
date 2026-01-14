@@ -1,15 +1,18 @@
 import json
 import random
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 from datasets import load_dataset
+import yaml
 from torch.utils.data import Dataset
 
 from .schema import build_schema_template
 from .smollm3_prompting import apply_smollm3_chat_template, encode_tool_call_wrapper
 from .utils import resolve_mask_token, resolve_null_token
+from .multi_dataset_loader import load_multi_dataset_from_config
 
 
 # Budget configuration - matches guide.md recommendations
@@ -33,6 +36,7 @@ class SmartScaffoldDataset(Dataset):
         mask_budget: int = 48,
         system_message: str = "/no_think",
         max_history_messages: int = 12,
+        data_config: Optional[Dict[str, Any]] = None,
     ):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
@@ -59,9 +63,17 @@ class SmartScaffoldDataset(Dataset):
         if null_token is not None:
             self.null_token, self.null_token_id = resolve_null_token(tokenizer, null_token)
 
-        # Load dataset (Hermes reasoning + tool use)
-        self.ds = load_dataset("interstellarninja/hermes_reasoning_tool_use", split=split)
+        self.ds = self._load_dataset(split, data_config)
         self.processed_examples = self._process_dataset()
+
+    def _load_dataset(self, split: str, data_config: Optional[Dict[str, Any]]):
+        config = data_config or self._load_default_config()
+        return load_multi_dataset_from_config(config)
+
+    def _load_default_config(self) -> Dict[str, Any]:
+        config_path = Path(__file__).resolve().parents[1] / "config.yaml"
+        with config_path.open("r") as handle:
+            return yaml.safe_load(handle)
 
     def _map_role(self, role: str) -> str:
         if role == "gpt":
@@ -104,11 +116,8 @@ class SmartScaffoldDataset(Dataset):
                 break
 
             conversations = example.get("conversations", [])
-            tools_schema_str = example.get("tools", "[]")
-
-            try:
-                tools_schema = json.loads(tools_schema_str)
-            except json.JSONDecodeError:
+            tools_schema = self._parse_tools_schema(example.get("tools", "[]"))
+            if tools_schema is None:
                 failed += 1
                 continue
 
@@ -117,35 +126,25 @@ class SmartScaffoldDataset(Dataset):
                 if msg['from'] == 'gpt' and '<tool_call>' in msg['value']:
                     self._process_tool_call(msg, msg_idx, conversations, tools_schema, processed)
 
-            # 2. Synthetic Negative Examples (Direct Answer)
-            # Randomly select non-tool-call assistant turns
-            # MediaTek augmentation strategy: Remove relevant tools -> force direct answer
-            # Here we simplify: Just pick regular chat turns and label them as "chat" (router_label=0)
-            # Since TRAIN_ROUTER is disabled, these will just serve as "no diffusion" examples if we want.
-            # But diffusion head needs mask. So "no diffusion" examples are skipped for diffusion loss.
-            # But useful for router training later.
-
-            for msg_idx, msg in enumerate(conversations):
-                if (
-                    msg.get("from") == "gpt"
-                    and "<tool_call>" not in msg.get("value", "")
-                    and random.random() < self.chat_sampling_rate
-                ):
-                    # Router-only example: conversation up to this assistant turn.
-                    messages = self._build_messages(conversations, msg_idx)
-                    processed.append(
-                        {
-                            "messages": messages,
-                            "tools_schema": tools_schema,
-                            "template": None,
-                        "target_tokens_map": None,
-                            "tool_name": None,
-                            "router_label": 0,
-                        }
-                    )
-
         print(f"Processed {len(processed)} examples, {failed} failed.")
         return processed
+
+    def _parse_tools_schema(self, tools_schema_raw):
+        if tools_schema_raw is None:
+            return []
+        if isinstance(tools_schema_raw, list):
+            return tools_schema_raw
+        if isinstance(tools_schema_raw, dict):
+            return [tools_schema_raw]
+        if isinstance(tools_schema_raw, str):
+            try:
+                parsed = json.loads(tools_schema_raw)
+            except json.JSONDecodeError:
+                return None
+            if isinstance(parsed, dict):
+                return [parsed]
+            return parsed
+        return None
 
     def _process_tool_call(self, msg, msg_idx, conversations, tools_schema, processed):
         full_text = msg['value']
@@ -217,9 +216,8 @@ class SmartScaffoldDataset(Dataset):
                 "messages": messages,
                 "tools_schema": tools_schema,
                 "tool_name": tool_name,
-            "template": template,
-            "target_tokens_map": target_tokens_map,
-                "router_label": 1,
+                "template": template,
+                "target_tokens_map": target_tokens_map
             }
         )
 
@@ -240,7 +238,7 @@ class SmartScaffoldDataset(Dataset):
             add_generation_prompt=True,
         )
 
-        # If no template (Chat example), return minimal dict for Router Training only
+        # If no template (Chat example), return minimal dict (no diffusion training)
         if ex["template"] is None:
             input_ids = torch.tensor(prompt_ids, dtype=torch.long)
             
@@ -257,7 +255,7 @@ class SmartScaffoldDataset(Dataset):
                 "attention_mask": attention_mask,
                 "scaffold_mask": scaffold_mask,
                 "labels": labels,
-                "router_label": ex["router_label"]
+                "is_tool": False,
             }
 
         tool_name = ex.get("tool_name")
@@ -313,7 +311,7 @@ class SmartScaffoldDataset(Dataset):
             "attention_mask": attention_mask,
             "scaffold_mask": scaffold_mask_tensor,
             "labels": labels_tensor,
-            "router_label": ex["router_label"]
+            "is_tool": True,
         }
 
 

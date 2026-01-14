@@ -133,14 +133,12 @@ Output Projection → Logits
 ```
 For each batch:
   1. Base LLM (frozen) → hidden_states
-  2. Router head → router_logits
-  3. Diffusion head training_step():
+  2. Diffusion head training_step():
      a. Sample random timestep t ~ U(0,1)
      b. Forward diffusion: add noise to tokens
      c. Predict clean tokens from noisy version
      d. Compute cross-entropy loss on masked positions only
-  4. Combine losses: diffusion_loss + router_loss (if training router)
-  5. Backprop through trainable heads only
+  3. Backprop through diffusion head only (base LLM frozen)
 ```
 
 ### 6. Dataset Loader Updates (✅ Complete)
@@ -156,13 +154,13 @@ For each batch:
 ### Complete Flow
 
 ```
-User Query → Router → Mode Selection
+User Query + Tools → Base Model (frozen)
                 ↓
-        [Chat | Think | Tool]
+    Base Model → Decides: Chat or Tool Call?
                 ↓
-        (If Tool selected)
+        (If Tool Call)
                 ↓
-    AR Model → Function Name
+    Base Model → Function Name (via native tool calling)
                 ↓
     Python → Build Scaffold Template
                 ↓
@@ -171,6 +169,10 @@ User Query → Router → Mode Selection
     Python → Merge Scaffold + Predictions
                 ↓
     Valid JSON Output
+
+Note: We use the frozen base model's native tool-calling capability
+instead of a separate router head. SmolLM3 already understands when
+to use tools via its built-in chat template with tool injection.
 ```
 
 ### Key Design Decisions
@@ -290,7 +292,7 @@ All borrowed code properly cited in file headers:
 
 2. **Decision Token mechanism**: From MediaTek paper
    - Explicit `<|answer|>` vs `<|use_tool|>` tokens
-   - Current router head provides classification but not explicit tokens
+   - Currently using base model's native tool calling instead
 
 ## Next Steps
 
@@ -372,6 +374,73 @@ model_kwargs = get_model_kwargs(config, device)
 model = HybridSmolLM(**model_kwargs)
 ```
 
+## Training Metrics
+
+### WandB Metrics (✅ Complete)
+
+**File:** `data/metrics.py`, integrated into `train.py`
+
+The training pipeline tracks specialized metrics for function calling with diffusion:
+
+#### 1. NULL Token Behavior Metrics
+Tracks the model's use of the special NULL token for unused scaffold slots:
+
+- **`train/null_prediction_rate`**: % of predictions that are NULL tokens (logged every 50 steps)
+- **`train/null_accuracy`**: Accuracy on positions that should be NULL
+- **`train/real_token_accuracy`**: Accuracy on non-NULL positions (most important!)
+- **`eval/null_precision`**: Of predicted NULLs, how many are correct (detects false NULL predictions)
+- **`eval/null_recall`**: Of actual NULLs, how many are predicted (detects missed NULL slots)
+
+**Why this matters**: Helps detect over-NULLing patterns (e.g., if model predicts 70-95% NULL tokens like in early training).
+
+#### 2. Scaffold Statistics
+Track the size and composition of scaffolds during evaluation:
+
+- **`eval/avg_scaffold_size`**: Average number of tokens in scaffolds
+- **`eval/avg_mask_count`**: Average masked positions per example
+- **`eval/avg_null_ratio`**: Average ratio of NULL to total scaffold tokens
+- **`eval/scaffold_size_std`**: Variability in scaffold sizes (detects outliers)
+- **`eval/max_scaffold_size`** / **`min_scaffold_size`**: Range of scaffold sizes
+
+**Why this matters**: Validates that `mask_budget` configuration is appropriate for the dataset.
+
+#### 3. Training Loss Components
+Standard loss tracking with enhanced detail:
+
+- **`train/total_loss`**: Overall loss (every step)
+- **`train/diffusion_loss`**: Diffusion head loss specifically
+- **`train/learning_rate`**: LR schedule tracking (every 100 steps)
+
+#### 4. Key Metrics to Watch
+
+| Metric | Good Pattern | Bad Pattern | Action |
+|--------|--------------|-------------|--------|
+| `real_token_accuracy` | Increasing (>80%) | Stuck <50% | Check data quality, increase capacity |
+| `null_prediction_rate` | Decreasing over time | Stays >70% | Reduce `mask_budget`, check loss weights |
+| `null_precision` | >0.8 | <0.5 | Model over-predicting NULLs |
+| `avg_null_ratio` | Stable 0.2-0.4 | >0.7 | Dataset has too many NULL slots |
+
+#### 5. Additional Metrics (Available in `metrics.py`)
+
+The metrics module also includes functions for:
+- **Field-level accuracy**: Track accuracy per argument field (location, units, etc.)
+- **Parse metrics**: JSON parse success rate, format validation
+- **Confidence metrics**: Track model confidence vs correctness
+
+These can be added to functional evaluation as needed.
+
+**Usage:**
+```python
+from data.metrics import (
+    calculate_null_token_metrics,
+    calculate_field_level_metrics,
+    calculate_parse_metrics,
+    calculate_scaffold_metrics
+)
+```
+
+All metrics are automatically logged to WandB during training when `use_wandb: true` in config.
+
 ## Testing
 
 Run the test suite:
@@ -382,6 +451,9 @@ pytest tests/test_smoke.py -v
 # All fast tests
 pytest tests/ -v -m "not slow"
 
+# Metrics tests
+pytest tests/test_metrics.py -v
+
 # All tests including slow ones
 pytest tests/ -v
 
@@ -391,9 +463,10 @@ python validate_setup.py
 
 **Test Coverage:**
 - ✅ Data pipeline (dataset loading, scaffolding)
-- ✅ Model components (router, diffusion head, forward pass)
+- ✅ Model components (diffusion head, forward pass)
 - ✅ SmolLM3 prompting (chat template, tool injection)
 - ✅ Inference pipeline (schema building, parsing)
 - ✅ Device configuration (auto-adjustment)
+- ✅ Metrics calculation (NULL tokens, fields, parsing)
 
-All 54 fast tests pass on both CUDA and MPS.
+All 61 fast tests pass on both CUDA and MPS (54 original + 7 metrics tests).

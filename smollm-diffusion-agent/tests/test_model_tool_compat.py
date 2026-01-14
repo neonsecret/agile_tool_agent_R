@@ -15,34 +15,16 @@ from data.smollm3_prompting import (
 )
 
 
-@pytest.fixture(scope="module")
-def tokenizer():
-    return AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM3-3B")
+@pytest.fixture
+def tokenizer(shared_tokenizer):
+    """Use shared session-scoped tokenizer."""
+    return shared_tokenizer
 
 
-@pytest.fixture(scope="module")
-def model(tokenizer):
-    """Load base model for tool compatibility tests.
-    
-    Note: This loads the full model which requires significant memory.
-    For CI/quick tests, you may want to skip these tests.
-    """
-    # Use float16 for MPS, bfloat16 for CUDA, float32 for CPU
-    if torch.backends.mps.is_available():
-        dtype = torch.float16
-    elif torch.cuda.is_available():
-        dtype = torch.bfloat16
-    else:
-        dtype = torch.float32
-    
-    model = AutoModelForCausalLM.from_pretrained(
-        "HuggingFaceTB/SmolLM3-3B",
-        torch_dtype=dtype,
-        device_map="auto",
-        low_cpu_mem_usage=True,
-    )
-    model.eval()
-    return model
+@pytest.fixture
+def model(shared_base_model):
+    """Use shared session-scoped base model."""
+    return shared_base_model
 
 
 class TestChatTemplateToolInjection:

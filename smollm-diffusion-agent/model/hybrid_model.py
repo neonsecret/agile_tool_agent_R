@@ -20,36 +20,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.device_utils import get_device, get_device_map_for_quantization
 
 
-class RouterHead(nn.Module):
-    def __init__(self, hidden_size, num_classes=3):
-        """
-        Mode router for Chat/Think/Tool classification.
-        
-        Args:
-            hidden_size: Size of input hidden states
-            num_classes: Number of modes (3: Chat=0, Tool=1, Think=2)
-        """
-        super().__init__()
-        self.classifier = nn.Linear(hidden_size, num_classes)
-
-    def forward(self, hidden_states, attention_mask=None):
-        """
-        Args:
-            hidden_states: [batch, seq_len, hidden]
-            attention_mask: Optional [batch, seq_len] with 1 for valid tokens.
-        """
-        if attention_mask is None:
-            pooled = hidden_states[:, -1, :]
-            return self.classifier(pooled)
-
-        # Pool the last non-padding token per sample.
-        # attention_mask is expected to be 1 for real tokens, 0 for padding.
-        lengths = attention_mask.long().sum(dim=1).clamp(min=1) - 1
-        batch_indices = torch.arange(hidden_states.size(0), device=hidden_states.device)
-        pooled = hidden_states[batch_indices, lengths, :]
-        return self.classifier(pooled)
-
-
 class HybridSmolLM(nn.Module):
     def __init__(self, base_model_id="HuggingFaceTB/SmolLM3-3B", load_in_4bit=False,
                  diffusion_config=None, vocab_size=None, use_unsloth=None, 
@@ -86,10 +56,8 @@ class HybridSmolLM(nn.Module):
             use_bidirectional=use_bidirectional,
             num_heads=num_heads
         )
-        self.router_head = RouterHead(hidden_size, num_classes=3)
 
         self.diffusion_head = self.diffusion_head.to(dtype=torch.bfloat16)
-        self.router_head = self.router_head.to(dtype=torch.bfloat16)
 
     def _init_torch_model(self, base_model_id, load_in_4bit, device, use_unsloth=None, max_seq_length=2048,
                           enable_unsloth_inference_opt=True):
@@ -169,8 +137,7 @@ class HybridSmolLM(nn.Module):
         )
 
     def forward(self, input_ids, attention_mask,
-                labels=None, scaffold_mask=None,
-                router_labels=None):
+                labels=None, scaffold_mask=None, return_logits=False):
         """
         Forward pass for training.
 
@@ -179,39 +146,43 @@ class HybridSmolLM(nn.Module):
             attention_mask: Attention mask
             labels: Ground truth tokens for diffusion loss
             scaffold_mask: Boolean mask indicating which positions to apply diffusion
-            router_labels: Ground truth labels for router classification
 
         Returns:
-            dict with 'loss', 'losses', 'router_logits'
+            dict with 'loss', 'losses'
         """
 
         with torch.no_grad():
             outputs = self.get_hidden_states(input_ids, attention_mask)
             hidden_states = outputs.hidden_states[-1]
 
-        router_logits = self.router_head(hidden_states, attention_mask=attention_mask)
-
         device = hidden_states.device
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)
         losses = {}
 
+        logits = None
         if labels is not None and scaffold_mask is not None and scaffold_mask.sum() > 0:
-            diff_loss = self.diffusion_head.training_step(
-                tokens=labels,
-                hidden_states=hidden_states,
-                scaffold_mask=scaffold_mask
-            )
+            if return_logits:
+                output = self.diffusion_head.training_step_with_outputs(
+                    tokens=labels,
+                    hidden_states=hidden_states,
+                    scaffold_mask=scaffold_mask,
+                )
+                diff_loss = output["loss"]
+                logits = output["logits"]
+            else:
+                diff_loss = self.diffusion_head.training_step(
+                    tokens=labels,
+                    hidden_states=hidden_states,
+                    scaffold_mask=scaffold_mask
+                )
             total_loss = total_loss + diff_loss
             losses["diffusion"] = diff_loss
 
-        if router_labels is not None:
-            router_loss = nn.CrossEntropyLoss()(router_logits, router_labels)
-            total_loss = total_loss + router_loss
-            losses["router"] = router_loss
-
         has_loss = len(losses) > 0
-        return {
+        output = {
             "loss": total_loss if has_loss else None,
-            "losses": losses,
-            "router_logits": router_logits
+            "losses": losses
         }
+        if logits is not None:
+            output["logits"] = logits
+        return output

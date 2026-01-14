@@ -90,8 +90,6 @@ def main():
         null_count = (batch["labels"] == null_token_id).sum().item()
         print(f"\nNULL token id {null_token_id} count in labels: {null_count}")
 
-    if "router_labels" in batch:
-        print(f"\nrouter_labels: {batch['router_labels'].tolist()}")
 
     # Show first available template text if present
     try:
@@ -212,8 +210,6 @@ def main():
         null_count = (batch["labels"] == null_token_id).sum().item()
         print(f"\nNULL token id {null_token_id} count in labels: {null_count}")
 
-    if "router_labels" in batch:
-        print(f"\nrouter_labels: {batch['router_labels'].tolist()}")
 
     # Show template text if available
     try:

@@ -268,33 +268,76 @@ class SchemaDiffusionHead(nn.Module):
         active_logits = logits[valid_mask_positions]
         active_labels = tokens[valid_mask_positions]
         
-        # Apply loss weighting: reduce contribution of NULL token predictions
-        # NULL tokens are correct 70-95% of the time (padding), but we want the model
-        # to focus more on real content tokens
+        loss = self._compute_loss(active_logits, active_labels)
+
+        return loss
+
+    def training_step_with_outputs(self, tokens, hidden_states, scaffold_mask):
+        batch_size = tokens.shape[0]
+
+        valid_labels = tokens >= 0
+        valid_scaffold_mask = scaffold_mask & valid_labels
+
+        if valid_scaffold_mask.sum() == 0:
+            loss = torch.tensor(0.0, device=tokens.device, requires_grad=True)
+            return {
+                "loss": loss,
+                "logits": None,
+                "mask_positions": None,
+                "noisy_tokens": None,
+                "t": None,
+            }
+
+        t = torch.rand(batch_size, device=tokens.device)
+
+        noisy_tokens, mask_positions = self.forward_diffusion(
+            tokens, scaffold_mask, t
+        )
+
+        logits = self.predict(hidden_states, noisy_tokens, t)
+
+        valid_mask_positions = mask_positions & valid_labels
+        if valid_mask_positions.sum() == 0:
+            loss = torch.tensor(0.0, device=tokens.device, requires_grad=True)
+            return {
+                "loss": loss,
+                "logits": logits,
+                "mask_positions": mask_positions,
+                "noisy_tokens": noisy_tokens,
+                "t": t,
+            }
+
+        active_logits = logits[valid_mask_positions]
+        active_labels = tokens[valid_mask_positions]
+        loss = self._compute_loss(active_logits, active_labels)
+
+        return {
+            "loss": loss,
+            "logits": logits,
+            "mask_positions": mask_positions,
+            "noisy_tokens": noisy_tokens,
+            "t": t,
+        }
+
+    def _compute_loss(self, active_logits, active_labels):
         if self.null_token_id is not None and active_labels.numel() > 0:
-            # Create sample weights: 0.3 for NULL predictions, 1.0 for real tokens
             sample_weights = torch.ones_like(active_labels, dtype=torch.float)
             null_mask = active_labels == self.null_token_id
-            sample_weights[null_mask] = 0.3  # Reduce loss contribution from NULL tokens
-            
-            # Compute weighted cross entropy
-            # CE without reduction, then apply weights manually
+            sample_weights[null_mask] = 0.3
+
             loss_unreduced = F.cross_entropy(
                 active_logits,
                 active_labels,
                 label_smoothing=self.label_smoothing,
-                reduction='none'
+                reduction="none",
             )
-            loss = (loss_unreduced * sample_weights).sum() / sample_weights.sum()
-        else:
-            # Standard label smoothing when no NULL token
-            loss = F.cross_entropy(
-                active_logits,
-                active_labels,
-                label_smoothing=self.label_smoothing
-            )
+            return (loss_unreduced * sample_weights).sum() / sample_weights.sum()
 
-        return loss
+        return F.cross_entropy(
+            active_logits,
+            active_labels,
+            label_smoothing=self.label_smoothing,
+        )
 
     def forward(self, hidden_states, current_tokens, step_ids, scaffold_mask=None):
         """

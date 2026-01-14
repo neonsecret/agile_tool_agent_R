@@ -8,28 +8,29 @@ from data.utils import resolve_mask_token, resolve_null_token
 from data.smollm3_prompting import parse_first_tool_call
 
 
-@pytest.fixture(scope="module")
-def tokenizer():
-    tok = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM3-3B")
-    if tok.pad_token_id is None:
-        tok.pad_token_id = tok.eos_token_id
-    return tok
+@pytest.fixture
+def tokenizer(shared_tokenizer):
+    """Use shared session-scoped tokenizer."""
+    return shared_tokenizer
 
 
-@pytest.fixture(scope="module")
-def device():
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+@pytest.fixture
+def device(shared_device):
+    """Use shared session-scoped device."""
+    return shared_device
 
 
-@pytest.fixture(scope="module")
-def mask_and_null(tokenizer):
-    mask_str, mask_id = resolve_mask_token(tokenizer, None)
-    null_str, null_id = resolve_null_token(tokenizer, None)
+@pytest.fixture
+def mask_and_null(shared_tokenizer):
+    mask_str, mask_id = resolve_mask_token(shared_tokenizer, None)
+    null_str, null_id = resolve_null_token(shared_tokenizer, None)
     return mask_str, mask_id, null_str, null_id
+
+
+@pytest.fixture
+def hybrid_model(shared_hybrid_model):
+    """Use shared session-scoped hybrid model."""
+    return shared_hybrid_model
 
 
 class TestSchemaTemplateBuilding:
@@ -126,39 +127,13 @@ Let me check the weather.
 class TestGeneratorInitialization:
 
     @pytest.mark.slow
-    def test_generator_initializes(self, tokenizer, device, mask_and_null):
-        from model.hybrid_model import HybridSmolLM
+    def test_generator_initializes(self, tokenizer, device, hybrid_model):
         from inference import FunctionCallGenerator
         
-        mask_str, mask_id, null_str, null_id = mask_and_null
-        
-        # Use 4-bit only on CUDA
-        use_4bit = torch.cuda.is_available()
-        
-        model = HybridSmolLM(
-            base_model_id="HuggingFaceTB/SmolLM3-3B",
-            load_in_4bit=use_4bit,
-            diffusion_config={
-                "hidden_dim": 512,
-                "num_layers": 1,
-                "num_steps": 2,
-            },
-            vocab_size=len(tokenizer),
-            use_unsloth=False,
-        )
-        model.diffusion_head.set_mask_token_id(mask_id)
-        if null_id:
-            model.diffusion_head.set_null_token_id(null_id)
-        
-        # Get actual device where model is loaded
-        if not model.use_mlx:
-            if device.type != "cpu":
-                model = model.to(device)
-        
-        actual_device = next(model.parameters()).device
+        actual_device = next(hybrid_model.parameters()).device
         
         generator = FunctionCallGenerator(
-            model=model,
+            model=hybrid_model,
             tokenizer=tokenizer,
             device=actual_device,
             use_torch_compile=False,
@@ -166,43 +141,19 @@ class TestGeneratorInitialization:
         )
         
         assert generator is not None
-        assert generator.model is model
+        assert generator.model is hybrid_model
 
     @pytest.mark.slow
-    def test_generator_generate_runs(self, tokenizer, device, mask_and_null):
+    def test_generator_generate_runs(self, tokenizer, device, mask_and_null, hybrid_model):
         """Test that generate() runs without crashing (even with untrained weights)."""
-        from model.hybrid_model import HybridSmolLM
         from inference import FunctionCallGenerator, GenerationConfig
         
         mask_str, mask_id, null_str, null_id = mask_and_null
         
-        # Use 4-bit only on CUDA
-        use_4bit = torch.cuda.is_available()
-        
-        model = HybridSmolLM(
-            base_model_id="HuggingFaceTB/SmolLM3-3B",
-            load_in_4bit=use_4bit,
-            diffusion_config={
-                "hidden_dim": 512,
-                "num_layers": 1,
-                "num_steps": 2,
-            },
-            vocab_size=len(tokenizer),
-            use_unsloth=False,
-        )
-        model.diffusion_head.set_mask_token_id(mask_id)
-        if null_id:
-            model.diffusion_head.set_null_token_id(null_id)
-        
-        if not model.use_mlx:
-            if device.type != "cpu":
-                model = model.to(device)
-        model.eval()
-        
-        actual_device = next(model.parameters()).device
+        actual_device = next(hybrid_model.parameters()).device
         
         generator = FunctionCallGenerator(
-            model=model,
+            model=hybrid_model,
             tokenizer=tokenizer,
             device=actual_device,
             use_torch_compile=False,
