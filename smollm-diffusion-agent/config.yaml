@@ -21,13 +21,15 @@ diffusion:
   num_heads: 8
   label_smoothing: 0.1  # Reduces overconfidence, improves generalization
   use_bidirectional: true  # Use bidirectional attention for global constraint verification
+  null_loss_weight: 0.1  # Down-weight NULL labels to avoid NULL-dominant solutions
+  null_prediction_penalty: 0.3  # Penalize NULL predictions on non-NULL labels
 
 # Training Configuration
 training:
   batch_size: 8
   learning_rate: 1.0e-4
   num_epochs: 8
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 3
   max_seq_len: 2048  # Increased from 1024: median=1198, 90th percentile=2278
   max_new_tokens: 256
   seed: 42
@@ -59,6 +61,12 @@ inference:
   temperature: 0.0         # Sampling temperature (0.0 = greedy)
   cfg_scale: 0.0           # Classifier-free guidance scale
   max_seq_len: 2048        # Maximum sequence length for inference
+  expansion:
+    enabled: true
+    max_rounds: 2
+    expand_tokens: 4
+    tail_window: 4
+    tail_null_threshold: 0.5
 
 # Data Configuration
 data:
@@ -77,7 +85,12 @@ data:
       limit: null
   
   limit: null # Global limit (overrides individual dataset limits if set)
-  mask_budget: 32  # Reduced from 48 to reduce NULL token ratio in training (was 70-95% NULL)
+  mask_budget: 32  # Max tokens per field (cap), used for training + inference
+  dynamic_budget:
+    enabled: true
+    min_tokens: 0
+    extra_tokens: 2
+    max_tokens: 32
   mask_token: null # null = use <|reserved_special_token_2|> (recommended), "eos" = use EOS, or specify token string
   null_token: null # null = use <|reserved_special_token_11|> for variable-length fields (automatic budgeting)
   system_message: "/no_think"  # SmolLM3 chat_template uses /think or /no_think in system message

@@ -22,14 +22,15 @@ from data.device_utils import get_device, get_device_map_for_quantization
 
 class HybridSmolLM(nn.Module):
     def __init__(self, base_model_id="HuggingFaceTB/SmolLM3-3B", load_in_4bit=False,
-                 diffusion_config=None, vocab_size=None, use_unsloth=None, 
-                 max_seq_length=2048, enable_unsloth_inference_opt=True):
+                 diffusion_config=None, vocab_size=None, use_unsloth=None,
+                 max_seq_length=2048, enable_unsloth_inference_opt=True,
+                 device: torch.device | None = None):
         super().__init__()
 
         if diffusion_config is None:
             diffusion_config = {}
 
-        device = get_device()
+        device = device or get_device()
         self.base_llm = None
         self.use_unsloth = False
 
@@ -45,6 +46,8 @@ class HybridSmolLM(nn.Module):
         label_smoothing = diffusion_config.get("label_smoothing", 0.1)
         use_bidirectional = diffusion_config.get("use_bidirectional", True)
         num_heads = diffusion_config.get("num_heads", 8)
+        null_loss_weight = diffusion_config.get("null_loss_weight", 0.3)
+        null_prediction_penalty = diffusion_config.get("null_prediction_penalty", 0.0)
 
         self.diffusion_head = SchemaDiffusionHead(
             input_dim=hidden_size,
@@ -54,7 +57,9 @@ class HybridSmolLM(nn.Module):
             num_steps=num_steps,
             label_smoothing=label_smoothing,
             use_bidirectional=use_bidirectional,
-            num_heads=num_heads
+            num_heads=num_heads,
+            null_loss_weight=null_loss_weight,
+            null_prediction_penalty=null_prediction_penalty,
         )
 
         self.diffusion_head = self.diffusion_head.to(dtype=torch.bfloat16)
@@ -98,6 +103,7 @@ class HybridSmolLM(nn.Module):
             }
 
             if device.type == "cuda":
+                device_index = device.index if device.index is not None else 0
                 if load_in_4bit:
                     print("Loading model with 4-bit quantization on CUDA")
                     kwargs["quantization_config"] = BitsAndBytesConfig(
@@ -109,7 +115,7 @@ class HybridSmolLM(nn.Module):
                     kwargs["device_map"] = get_device_map_for_quantization(device)
                 else:
                     print("Loading model in bfloat16 on CUDA")
-                    kwargs["device_map"] = "auto"
+                    kwargs["device_map"] = {"": device_index}
             elif device.type == "mps":
                 print("Loading model in bfloat16 on MPS (Apple Silicon)")
                 kwargs["device_map"] = "auto"

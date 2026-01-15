@@ -4,7 +4,6 @@ try:
     import unsloth
 except:
     pass
-import yaml
 import random
 from torch.utils.data import DataLoader, random_split
 from torch.optim import AdamW
@@ -28,357 +27,9 @@ from data.metrics import (
     extract_tool_call_json
 )
 
-
-def load_config(config_path="config.yaml"):
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
-
-    accelerator.print(f"Loading checkpoint from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=accelerator.device)
-
-    unwrapped_model = accelerator.unwrap_model(model)
-    unwrapped_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-    # Load scheduler state if available
-    if 'scheduler_state_dict' in checkpoint and scheduler is not None:
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        accelerator.print("Loaded scheduler state from checkpoint")
-
-    start_epoch = checkpoint['epoch'] + 1
-    best_eval_loss = checkpoint['eval_loss']
-
-    accelerator.print(f"Resumed from epoch {checkpoint['epoch']}, best eval loss: {best_eval_loss:.4f}")
-
-    return start_epoch, best_eval_loss
-
-
-def build_collate_fn(bucket_sizes, max_seq_len, pad_token_id: int):
-    """Create a collate_fn that pads to the next bucket size >= batch max length.
-
-    This keeps shapes more stable for torch.compile and CUDA graphs.
-    """
-    bucket_sizes = sorted(bucket_sizes)
-
-    def collate_fn(batch):
-        # Determine target pad length: next bucket >= max length in batch
-        max_len = max(item["input_ids"].size(0) for item in batch)
-        pad_to = None
-        for b in bucket_sizes:
-            if b >= max_len:
-                pad_to = b
-                break
-        if pad_to is None:
-            pad_to = bucket_sizes[-1]
-        pad_to = min(pad_to, max_seq_len)
-
-        def pad_tensor(t: torch.Tensor, pad_value: int):
-            if t.size(0) > pad_to:
-                return t[:pad_to]
-            if t.size(0) == pad_to:
-                return t
-            pad_width = pad_to - t.size(0)
-            return F.pad(t, (0, pad_width), value=pad_value)
-
-        input_ids = [pad_tensor(item["input_ids"], pad_value=pad_token_id) for item in batch]
-        attention_mask = [pad_tensor(item["attention_mask"], pad_value=0) for item in batch]
-        scaffold_mask = [pad_tensor(item["scaffold_mask"], pad_value=0) for item in batch]
-        labels = [pad_tensor(item["labels"], pad_value=-100) for item in batch]
-
-        batch_dict = {
-            "input_ids": torch.stack(input_ids, dim=0),
-            "attention_mask": torch.stack(attention_mask, dim=0),
-            "scaffold_mask": torch.stack(scaffold_mask, dim=0),
-            "labels": torch.stack(labels, dim=0),
-        }
-
-        return batch_dict
-
-    return collate_fn
-
-
-def evaluate(model, eval_dataloader, accelerator, null_token_id=None, return_logits=True):
-    """Evaluate the model on validation set with enhanced metrics."""
-    model.eval()
-    total_loss = 0
-    total_diffusion_loss = 0
-    num_batches = 0
-    
-    # Enhanced metrics tracking
-    all_predictions = []
-    all_labels = []
-    all_mask_positions = []
-    scaffold_sizes = []
-    mask_counts = []
-    null_counts = []
-
-    eval_bar = tqdm(eval_dataloader, desc="Evaluating", disable=not accelerator.is_local_main_process)
-
-    with torch.no_grad():
-        for batch in eval_bar:
-            outputs = model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                labels=batch["labels"],
-                scaffold_mask=batch["scaffold_mask"],
-                return_logits=return_logits,
-            )
-
-            if outputs["loss"] is not None:
-                total_loss += outputs["loss"].item()
-                num_batches += 1
-
-                losses_detail = outputs.get("losses", {})
-                if "diffusion" in losses_detail:
-                    total_diffusion_loss += losses_detail["diffusion"].item()
-            
-            # Collect predictions for metrics
-            if "logits" in outputs:
-                logits = outputs["logits"]
-                predictions = torch.argmax(logits, dim=-1)
-                
-                # Store for metrics calculation
-                all_predictions.append(predictions.cpu())
-                all_labels.append(batch["labels"].cpu())
-                all_mask_positions.append(batch["scaffold_mask"].cpu())
-                
-                # Scaffold statistics
-                for i in range(batch["scaffold_mask"].size(0)):
-                    scaffold_mask = batch["scaffold_mask"][i]
-                    labels = batch["labels"][i]
-                    
-                    scaffold_size = scaffold_mask.sum().item()
-                    scaffold_sizes.append(scaffold_size)
-                    mask_counts.append(scaffold_size)
-                    
-                    if null_token_id is not None:
-                        null_count = ((labels == null_token_id) & scaffold_mask).sum().item()
-                        null_counts.append(null_count)
-
-    model.train()
-
-    # Calculate base metrics
-    metrics = {
-        "eval/total_loss": total_loss / max(num_batches, 1),
-        "eval/diffusion_loss": total_diffusion_loss / max(num_batches, 1),
-    }
-    
-    # Calculate NULL token metrics if we have data
-    if all_predictions and null_token_id is not None:
-        predictions_cat = torch.cat(all_predictions, dim=0)
-        labels_cat = torch.cat(all_labels, dim=0)
-        mask_positions_cat = torch.cat(all_mask_positions, dim=0)
-        
-        null_metrics = calculate_null_token_metrics(
-            predictions_cat, labels_cat, mask_positions_cat, null_token_id
-        )
-        for key, value in null_metrics.items():
-            metrics[f"eval/{key}"] = value
-    
-    # Calculate scaffold metrics
-    if scaffold_sizes:
-        scaffold_metrics = calculate_scaffold_metrics(
-            scaffold_sizes, mask_counts, null_counts if null_counts else [0] * len(mask_counts)
-        )
-        for key, value in scaffold_metrics.items():
-            metrics[f"eval/{key}"] = value
-
-    return metrics
-
-
-def s3_denoise(model, hidden_states, labels, scaffold_mask, num_steps=4):
-    """
-    S3-style top-K confidence denoising (matches inference.py strategy).
-
-    This uses the ACTUAL inference strategy:
-    - Fixed t=0 (fully denoised state)
-    - Top-K confidence-based token selection
-    - Iterative refinement over multiple steps
-
-    Args:
-        model: The HybridSmolLM model (unwrapped)
-        hidden_states: Context embeddings from base model
-        labels: Ground truth tokens (used to initialize sequence)
-        scaffold_mask: Boolean mask indicating positions to denoise
-        num_steps: Number of S3 denoising steps
-
-    Returns:
-        final_tokens: Denoised tokens after S3 iteration
-    """
-    device = hidden_states.device
-    mask_token_id = model.diffusion_head.mask_token_id
-
-    # Convert hidden_states to match diffusion head dtype (bfloat16)
-    diffusion_head_dtype = next(model.diffusion_head.parameters()).dtype
-    hidden_states = hidden_states.to(dtype=diffusion_head_dtype)
-
-    current_tokens = labels.clone()
-    current_tokens[scaffold_mask] = mask_token_id
-
-    total_masks = scaffold_mask.sum().item()
-    budget = max(1, int(total_masks / num_steps))
-
-    t = torch.zeros(1, device=device)
-
-    for step in range(num_steps):
-        mask_positions = current_tokens == mask_token_id
-        mask_positions = mask_positions & scaffold_mask
-        mask_indices = torch.nonzero(mask_positions[0], as_tuple=False).squeeze(-1)
-
-        if mask_indices.numel() == 0:
-            break
-
-        # Handle 0D tensor case (single mask position)
-        if mask_indices.dim() == 0:
-            mask_indices = mask_indices.unsqueeze(0)
-
-        logits = model.diffusion_head.predict(hidden_states, current_tokens, t)
-        predictions = torch.argmax(logits, dim=-1)
-
-        log_probs = torch.log_softmax(logits[0, mask_indices], dim=-1)
-        mask_conf = log_probs.gather(-1, predictions[0, mask_indices].unsqueeze(-1)).squeeze(-1)
-
-        remaining = mask_indices.numel()
-        remaining_steps = num_steps - step
-        if remaining_steps <= 1:
-            k = remaining
-        else:
-            k = min(budget, remaining)
-
-        topk = torch.topk(mask_conf, k)
-        selected = mask_indices[topk.indices]
-
-        current_tokens[0, selected] = predictions[0, selected]
-
-    return current_tokens
-
-
-def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examples=5):
-    """
-    Evaluate model using S3-style inference (matches actual inference.py strategy).
-
-    This tests the REAL inference approach:
-    - Fixed t=0 prediction
-    - Top-K confidence-based selection
-    - Iterative refinement
-    """
-    model.eval()
-
-    accelerator.print("\n" + "=" * 80)
-    accelerator.print("FUNCTIONAL EVALUATION - S3 Denoising Strategy")
-    accelerator.print("=" * 80)
-
-    indices = random.sample(range(len(eval_dataset)), min(num_examples, len(eval_dataset)))
-
-    total_exact_matches = 0
-    total_token_accuracy = 0
-    total_tokens = 0
-
-    unwrapped_model = accelerator.unwrap_model(model)
-    diffusion_num_steps = unwrapped_model.diffusion_head.num_steps
-
-    with torch.no_grad():
-        for i, idx in enumerate(indices):
-            example = eval_dataset[idx]
-
-            input_ids = example['input_ids'].unsqueeze(0).to(accelerator.device)
-            attention_mask = example['attention_mask'].unsqueeze(0).to(accelerator.device)
-            scaffold_mask = example['scaffold_mask'].unsqueeze(0).to(accelerator.device)
-            labels = example['labels'].unsqueeze(0).to(accelerator.device)
-
-            if scaffold_mask.sum() == 0:
-                continue
-
-            outputs = unwrapped_model.base_llm(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True
-            )
-            hidden_states = outputs.hidden_states[-1]
-
-            predicted_tokens = s3_denoise(
-                unwrapped_model,
-                hidden_states,
-                labels,
-                scaffold_mask,
-                num_steps=diffusion_num_steps
-            )
-
-            masked_positions = scaffold_mask[0].cpu()
-            true_tokens = labels[0][masked_positions].cpu()
-            pred_tokens = predicted_tokens[0][masked_positions].cpu()
-
-            # Filter out invalid token IDs (-100 is padding/ignore token)
-            valid_mask = (true_tokens >= 0) & (true_tokens < len(tokenizer))
-            true_tokens_valid = true_tokens[valid_mask]
-            pred_tokens_valid = pred_tokens[valid_mask]
-
-            # Strip NULL tokens from both true and predicted (for self-adaptive masking)
-            null_token_id = unwrapped_model.diffusion_head.null_token_id
-            if null_token_id is not None:
-                # Remove NULL tokens from true tokens (they're padding for variable-length fields)
-                true_tokens_valid = true_tokens_valid[true_tokens_valid != null_token_id]
-                # Remove NULL tokens from predictions (model may predict NULL for unused slots)
-                pred_tokens_valid = pred_tokens_valid[pred_tokens_valid != null_token_id]
-
-            # Align lengths: compare only up to minimum length (handles variable-length fields)
-            min_len = min(len(true_tokens_valid), len(pred_tokens_valid))
-            if min_len == 0:
-                continue
-
-            true_tokens_aligned = true_tokens_valid[:min_len]
-            pred_tokens_aligned = pred_tokens_valid[:min_len]
-
-            correct_tokens = (true_tokens_aligned == pred_tokens_aligned).sum().item()
-            num_tokens = min_len
-            token_accuracy = correct_tokens / num_tokens if num_tokens > 0 else 0
-
-            total_token_accuracy += correct_tokens
-            total_tokens += num_tokens
-
-            exact_match = torch.all(true_tokens_aligned == pred_tokens_aligned).item()
-            total_exact_matches += exact_match
-
-            # Convert to list of integers for tokenizer.decode
-            true_tokens_list = true_tokens_aligned.tolist()
-            pred_tokens_list = pred_tokens_aligned.tolist()
-
-            true_masked_text = tokenizer.decode(true_tokens_list, skip_special_tokens=False)
-            pred_masked_text = tokenizer.decode(pred_tokens_list, skip_special_tokens=False)
-
-            input_text = tokenizer.decode(input_ids[0], skip_special_tokens=False)
-
-            accelerator.print(f"\n--- Example {i + 1} ---")
-            accelerator.print(f"Input (first 200 chars):\n  {input_text[:200]}...")
-            accelerator.print(f"\nMasked positions: {masked_positions.sum().item()} tokens")
-            accelerator.print(f"Ground Truth (masked): {true_masked_text}")
-            accelerator.print(f"Predicted (masked):    {pred_masked_text}")
-            accelerator.print(f"Token Accuracy: {token_accuracy:.2%} ({correct_tokens}/{num_tokens})")
-            accelerator.print(f"Exact Match: {'✓' if exact_match else '✗'}")
-
-    accelerator.print("\n" + "-" * 80)
-    empty_cache(accelerator.device)
-    if total_tokens > 0:
-        overall_token_acc = total_token_accuracy / total_tokens
-        overall_exact_match = total_exact_matches / len(indices)
-
-        accelerator.print(f"Overall Statistics ({len(indices)} examples):")
-        accelerator.print(f"  Token-level Accuracy: {overall_token_acc:.2%} ({total_token_accuracy}/{total_tokens})")
-        accelerator.print(f"  Exact Match Rate: {overall_exact_match:.2%} ({total_exact_matches}/{len(indices)})")
-
-        return {
-            "functional/token_accuracy": overall_token_acc,
-            "functional/exact_match_rate": overall_exact_match,
-        }
-    else:
-        accelerator.print("No masked tokens found in examples")
-        return {}
-
+from train_utils import load_config, build_collate_fn, load_checkpoint
+from train_eval import evaluate, _compute_null_counts, _null_metrics_from_counts, _sum_across_processes
+from train_functional import functional_evaluation
 
 def train():
     # Load Config
@@ -528,11 +179,16 @@ def train():
     
     optimizer = AdamW(params_to_optimize, lr=float(training_cfg["learning_rate"]))
 
-    # 5. Learning Rate Scheduler (Cosine with Warmup)
+    # 5. Prepare
+    model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+        model, optimizer, train_dataloader, eval_dataloader
+    )
+
+    # 6. Learning Rate Scheduler (Cosine with Warmup)
     # From guide.md: warmup_steps=2500, cosine decay
     num_epochs = training_cfg["num_epochs"]
     gradient_accumulation_steps = training_cfg["gradient_accumulation_steps"]
-    num_update_steps_per_epoch = len(train_dataloader) // gradient_accumulation_steps
+    num_update_steps_per_epoch = max(1, len(train_dataloader) // gradient_accumulation_steps)
     total_training_steps = num_epochs * num_update_steps_per_epoch
 
     warmup_steps = training_cfg.get("warmup_steps", 2500)
@@ -548,11 +204,6 @@ def train():
     accelerator.print(f"LR Scheduler: Cosine with warmup")
     accelerator.print(f"  Total training steps: {total_training_steps}")
     accelerator.print(f"  Warmup steps: {warmup_steps}")
-
-    # 6. Prepare
-    model, optimizer, train_dataloader, eval_dataloader, scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader, scheduler
-    )
 
     # 7. Load checkpoint if resuming
     start_epoch = 0
@@ -625,15 +276,18 @@ def train():
                     with torch.no_grad():
                         logits = outputs["logits"]
                         predictions = torch.argmax(logits, dim=-1)
-                        
-                        null_metrics = calculate_null_token_metrics(
-                            predictions, 
-                            batch["labels"], 
+                        counts = _compute_null_counts(
+                            predictions,
+                            batch["labels"],
                             batch["scaffold_mask"],
-                            null_token_id
+                            null_token_id,
                         )
-                        for key, value in null_metrics.items():
-                            logs[f"train/{key}"] = value
+                        if counts is not None:
+                            for key, value in counts.items():
+                                counts[key] = _sum_across_processes(value, accelerator)
+                            null_metrics = _null_metrics_from_counts(counts)
+                            for key, value in null_metrics.items():
+                                logs[f"train/{key}"] = value
 
                 accelerator.log(logs, step=global_step)
 

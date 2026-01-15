@@ -36,7 +36,8 @@ def get_device_map_for_quantization(device: torch.device):
     For MPS, use device_map="auto" or None and handle device placement manually.
     """
     if device.type == "cuda":
-        return {"": 0}  # bitsandbytes requires this format
+        device_index = device.index if device.index is not None else 0
+        return {"": device_index}  # bitsandbytes requires this format
     elif device.type == "mps":
         # MPS doesn't support bitsandbytes, so this shouldn't be called
         # But if it is, return None to let transformers handle it

@@ -1,10 +1,8 @@
 import json
-import random
-import re
+import torch
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-import torch
 from datasets import load_dataset
 import yaml
 from torch.utils.data import Dataset
@@ -13,6 +11,12 @@ from .schema import build_schema_template
 from .smollm3_prompting import apply_smollm3_chat_template, encode_tool_call_wrapper
 from .utils import resolve_mask_token, resolve_null_token
 from .multi_dataset_loader import load_multi_dataset_from_config
+from .dataset_processing import (
+    parse_tools_schema,
+    map_role,
+    build_messages,
+    extract_tool_call_from_message,
+)
 
 
 # Budget configuration - matches guide.md recommendations
@@ -63,49 +67,32 @@ class SmartScaffoldDataset(Dataset):
         if null_token is not None:
             self.null_token, self.null_token_id = resolve_null_token(tokenizer, null_token)
 
-        self.ds = self._load_dataset(split, data_config)
+        self.config = data_config or self._load_default_config()
+        self.dynamic_budget = self._get_dynamic_budget_config(self.config)
+        self.ds = self._load_dataset(split, self.config)
         self.processed_examples = self._process_dataset()
 
-    def _load_dataset(self, split: str, data_config: Optional[Dict[str, Any]]):
-        config = data_config or self._load_default_config()
-        return load_multi_dataset_from_config(config)
+    def _load_dataset(self, split: str, data_config: Dict[str, Any]):
+        return load_multi_dataset_from_config(data_config)
 
     def _load_default_config(self) -> Dict[str, Any]:
         config_path = Path(__file__).resolve().parents[1] / "config.yaml"
         with config_path.open("r") as handle:
             return yaml.safe_load(handle)
 
-    def _map_role(self, role: str) -> str:
-        if role == "gpt":
-            return "assistant"
-        if role == "human":
-            return "user"
-        return role
-
-    def _build_messages(
-        self,
-        conversations: Sequence[Dict[str, Any]],
-        msg_idx: int,
-    ) -> List[Dict[str, str]]:
-        """
-        Build a SmolLM3-compatible `messages` list for tokenizer.apply_chat_template.
-
-        The returned messages ALWAYS start with a system message, and end with the
-        last message before `msg_idx` (typically a user message). We truncate older
-        history so the scaffold fits under `max_seq_len`.
-        """
-        history: List[Dict[str, str]] = [{"role": "system", "content": self.system_message}]
-
-        upto = conversations[:msg_idx]
-        mapped = [
-            {"role": self._map_role(m.get("from", "")), "content": m.get("value", "")}
-            for m in upto
-            if m.get("from") is not None and m.get("value") is not None
-        ]
-        if self.max_history_messages > 0:
-            mapped = mapped[-self.max_history_messages:]
-        history.extend(mapped)
-        return history
+    def _get_dynamic_budget_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        data_cfg = config.get("data", {})
+        dynamic_cfg = data_cfg.get("dynamic_budget", {})
+        enabled = dynamic_cfg.get("enabled", False)
+        max_tokens = dynamic_cfg.get("max_tokens")
+        if max_tokens is None:
+            max_tokens = data_cfg.get("mask_budget")
+        return {
+            "enabled": enabled,
+            "min_tokens": dynamic_cfg.get("min_tokens", 0),
+            "extra_tokens": dynamic_cfg.get("extra_tokens", 0),
+            "max_tokens": max_tokens,
+        }
 
     def _process_dataset(self):
         processed = []
@@ -116,12 +103,11 @@ class SmartScaffoldDataset(Dataset):
                 break
 
             conversations = example.get("conversations", [])
-            tools_schema = self._parse_tools_schema(example.get("tools", "[]"))
+            tools_schema = parse_tools_schema(example.get("tools", "[]"))
             if tools_schema is None:
                 failed += 1
                 continue
 
-            # 1. Positive Examples (Tool Calls)
             for msg_idx, msg in enumerate(conversations):
                 if msg['from'] == 'gpt' and '<tool_call>' in msg['value']:
                     self._process_tool_call(msg, msg_idx, conversations, tools_schema, processed)
@@ -129,36 +115,11 @@ class SmartScaffoldDataset(Dataset):
         print(f"Processed {len(processed)} examples, {failed} failed.")
         return processed
 
-    def _parse_tools_schema(self, tools_schema_raw):
-        if tools_schema_raw is None:
-            return []
-        if isinstance(tools_schema_raw, list):
-            return tools_schema_raw
-        if isinstance(tools_schema_raw, dict):
-            return [tools_schema_raw]
-        if isinstance(tools_schema_raw, str):
-            try:
-                parsed = json.loads(tools_schema_raw)
-            except json.JSONDecodeError:
-                return None
-            if isinstance(parsed, dict):
-                return [parsed]
-            return parsed
-        return None
-
     def _process_tool_call(self, msg, msg_idx, conversations, tools_schema, processed):
         full_text = msg['value']
-        tool_call_matches = list(re.finditer(r'<tool_call>(.*?)</tool_call>', full_text, re.DOTALL))
+        tool_call_json = extract_tool_call_from_message(full_text)
 
-        if not tool_call_matches:
-            return
-
-        match = tool_call_matches[0]
-        tool_call_json_str = match.group(1).strip()
-
-        try:
-            tool_call_json = json.loads(tool_call_json_str)
-        except json.JSONDecodeError:
+        if tool_call_json is None:
             return
 
         tool_name = tool_call_json.get("name")
@@ -168,7 +129,9 @@ class SmartScaffoldDataset(Dataset):
         if not tool_schema:
             return
 
-        messages = self._build_messages(conversations, msg_idx)
+        messages = build_messages(
+            conversations, msg_idx, self.system_message, self.max_history_messages
+        )
 
         # Use Robust Schema Builder
         fields = []
@@ -189,8 +152,7 @@ class SmartScaffoldDataset(Dataset):
             # EOS tokens are structural - Python/template handles them, not the model
             # This aligns with schema scaffolding: Python does syntax, LLM does semantics
 
-            # Automatic budget: min for consistency, max to prevent excessive memory
-            budget = min(max(len(val_ids), MIN_FIELD_BUDGET), self.mask_budget)
+            budget = self._compute_budget(len(val_ids))
             fields.append((key, budget))
             target_tokens_map[key] = val_ids
 
@@ -223,6 +185,19 @@ class SmartScaffoldDataset(Dataset):
 
     def __len__(self):
         return len(self.processed_examples)
+
+    def _compute_budget(self, value_length: int) -> int:
+        if not self.dynamic_budget["enabled"]:
+            return min(max(value_length, MIN_FIELD_BUDGET), self.mask_budget)
+
+        budget = value_length + self.dynamic_budget["extra_tokens"]
+        min_tokens = self.dynamic_budget["min_tokens"]
+        if min_tokens is not None:
+            budget = max(budget, min_tokens)
+        max_tokens = self.dynamic_budget["max_tokens"]
+        if max_tokens is not None:
+            budget = min(budget, max_tokens)
+        return max(budget, 0)
 
     def __getitem__(self, idx):
         ex = self.processed_examples[idx]

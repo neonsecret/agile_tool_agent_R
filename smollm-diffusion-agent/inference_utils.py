@@ -1,110 +1,73 @@
+"""
+Helper functions for inference operations.
+
+Extracted from inference.py to improve code organization.
+"""
+
+from typing import Dict, Any, List, Optional, Tuple, Sequence
 import torch
-from model.hybrid_model import HybridSmolLM
-from data.schema_builder import SchemaTemplate
-from scheduler import DiscreteDiffusionScheduler
-from data.utils import validate_mask_token_consistency
+import yaml
 
 
-class DiffusionInference:
-    """
-    Inference pipeline for Hybrid Diffusion Agent.
-    Implements Top-K Remasking strategy.
-    """
+def load_config(config_path="config.yaml"):
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
 
-    def __init__(self, model: HybridSmolLM, device: torch.device):
-        self.model = model
-        self.device = device
-        self.scheduler = DiscreteDiffusionScheduler()
 
-    def generate(self,
-                 prompt_ids: torch.Tensor,
-                 template: SchemaTemplate,
-                 steps: int = 4,
-                 temperature: float = 0.0,
-                 initial_guess: torch.Tensor = None):
+def _is_cuda_graph_supported(device: torch.device) -> bool:
+    return device.type == "cuda" and torch.cuda.is_available()
 
-        self.model.eval()
-        
-        validate_mask_token_consistency(
-            self.model.diffusion_head.mask_token_id,
-            template.mask_token_id,
-            context=" in DiffusionInference.generate()"
-        )
 
-        # 1. Prepare Input Sequence
-        template_tokens = torch.tensor(template.tokens, device=self.device).unsqueeze(0)  # [1, seq]
+def _can_use_torch_compile_mps(device: torch.device) -> bool:
+    """Check if torch.compile works on MPS (requires PyTorch 2.1+)."""
+    if device.type != "mps" or not torch.backends.mps.is_available():
+        return False
 
-        # If prompt_ids is None (e.g. continuation), handle it
-        if prompt_ids is not None:
-            full_input = torch.cat([prompt_ids, template_tokens], dim=1)
-            prompt_len = prompt_ids.shape[1]
-        else:
-            full_input = template_tokens
-            prompt_len = 0
+    try:
+        version = torch.__version__.split('.')
+        major, minor = int(version[0]), int(version[1])
+        return major >= 2 and minor >= 1
+    except (ValueError, IndexError):
+        return False
 
-        # 2. Base Model Forward (Get Context)
-        # We only need to do this ONCE because the context (prompt) is frozen.
-        # The diffusion head takes this frozen context + variable noise.
-        with torch.no_grad():
-            outputs = self.model.base_llm(full_input, output_hidden_states=True)
-            hidden_states = outputs.hidden_states[-1]  # [1, total_seq, hidden]
 
-        # 3. Identify Mask Positions
-        mask_token_id = template.mask_token_id
-        # Create mask map [1, total_seq]
-        # We strictly limit diffusion to the template part that was initialized as masks
-        scaffold_mask = torch.zeros_like(full_input, dtype=torch.bool)
-        scaffold_mask[:, prompt_len:] = (template_tokens == mask_token_id)
+def _default_budget_config() -> Dict[str, int]:
+    from data.budget_utils import MIN_FIELD_BUDGET, DEFAULT_MAX_BUDGET
+    
+    config = load_config()
+    data_cfg = config.get("data", {})
+    dynamic_budget_cfg = data_cfg.get("dynamic_budget", {})
+    max_tokens = dynamic_budget_cfg.get(
+        "max_tokens",
+        data_cfg.get("mask_budget", DEFAULT_MAX_BUDGET),
+    )
+    min_tokens = dynamic_budget_cfg.get("min_tokens", MIN_FIELD_BUDGET)
+    extra_tokens = dynamic_budget_cfg.get("extra_tokens", 0)
+    return {
+        "min_tokens": min_tokens,
+        "max_tokens": max_tokens,
+        "extra_tokens": extra_tokens,
+    }
 
-        mask_indices = torch.nonzero(scaffold_mask, as_tuple=True)[1]
-        if len(mask_indices) == 0:
-            return full_input
 
-            # 4. Initialize State
-        # Start from pure noise (all masks) or warm start
-        current_tokens = full_input.clone()
+def _default_expansion_config() -> Dict[str, Any]:
+    config = load_config()
+    infer_cfg = config.get("inference", {})
+    expansion_cfg = infer_cfg.get("expansion", {})
+    return {
+        "enabled": expansion_cfg.get("enabled", False),
+        "max_rounds": expansion_cfg.get("max_rounds", 0),
+        "expand_tokens": expansion_cfg.get("expand_tokens", 4),
+        "tail_window": expansion_cfg.get("tail_window", 4),
+        "tail_null_threshold": expansion_cfg.get("tail_null_threshold", 0.5),
+    }
 
-        if initial_guess is not None:
-            # Warm Start: D2F / Asymmetric Distillation inspiration
-            # If we have a guess, we fill it in.
-            # But we must ensure it aligns length-wise.
-            # For now, simplistic overwrite if lengths match.
-            if initial_guess.shape == current_tokens.shape:
-                # We only copy into the scaffold region
-                current_tokens[:, prompt_len:] = initial_guess[:, prompt_len:]
-                # We might want to start with some noise (partial masking) if guess is imperfect?
-                # For simplicity, let's assume warm start means "start at t=T/2" or similar.
-                # But `current_tokens` here represents x_t.
-                pass
 
-        # 5. Diffusion Loop (Reverse Process: T -> 0)
-        timesteps = self.scheduler.get_timesteps(steps, device=self.device)
-
-        for i, t in enumerate(timesteps):
-            # Determine previous timestep (next in schedule)
-            prev_t = timesteps[i + 1] if i < len(timesteps) - 1 else 0
-
-            # t is a tensor [1]
-            t_batch = t.unsqueeze(0).expand(full_input.shape[0])
-
-            with torch.no_grad():
-                # Head Forward
-                logits = self.model.diffusion_head(
-                    hidden_states,
-                    current_tokens,
-                    t_batch,
-                    scaffold_mask
-                )
-
-                # Top-K Remasking Step
-                # Updates current_tokens in-place (or returns new)
-                current_tokens = self.scheduler.step_remask(
-                    current_tokens,
-                    logits,
-                    t.item(),
-                    prev_t.item(),
-                    mask_token_id,
-                    scaffold_mask
-                )
-
-        return current_tokens
+def _apply_gumbel_noise(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    """Apply Gumbel noise for temperature-based sampling."""
+    if temperature <= 0.0:
+        return logits
+    noise = torch.rand_like(logits)
+    noise = noise.clamp_min(1e-10)
+    gumbel = -torch.log(-torch.log(noise))
+    return logits / temperature + gumbel

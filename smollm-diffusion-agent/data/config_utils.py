@@ -121,6 +121,7 @@ def get_model_kwargs(config: Dict[str, Any], device: torch.device) -> Dict[str, 
         "use_unsloth": use_unsloth,
         "max_seq_length": train_cfg.get("max_seq_len", 2048),
         "enable_unsloth_inference_opt": model_cfg.get("enable_unsloth_inference_opt", True),
+        "device": device,
     }
     
     return kwargs

@@ -8,91 +8,18 @@ Combines:
 - NULL token support for self-adaptive masking (variable-length fields)
 """
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .noise_schedule import LogLinearNoise
-
-
-class BidirectionalAttentionBlock(nn.Module):
-    """Transformer encoder block with bidirectional (non-causal) self-attention.
-    
-    Unlike autoregressive attention, this allows each position to attend to all
-    other positions, enabling global constraint verification for structured output.
-    """
-    
-    def __init__(self, hidden_dim, num_heads=8, dropout=0.1):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        self.head_dim = hidden_dim // num_heads
-        
-        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.out_proj = nn.Linear(hidden_dim, hidden_dim)
-        
-        self.norm1 = nn.LayerNorm(hidden_dim)
-        self.norm2 = nn.LayerNorm(hidden_dim)
-        
-        self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 4),
-            nn.GELU(),
-            nn.Linear(hidden_dim * 4, hidden_dim),
-        )
-        
-        self.dropout = nn.Dropout(dropout)
-        self.scale = math.sqrt(self.head_dim)
-    
-    def forward(self, x, attention_mask=None):
-        """
-        Args:
-            x: [batch, seq_len, hidden_dim]
-            attention_mask: Optional [batch, seq_len] boolean mask (True = attend)
-        
-        Returns:
-            [batch, seq_len, hidden_dim]
-        """
-        batch_size, seq_len, _ = x.shape
-        
-        # Pre-norm
-        normed = self.norm1(x)
-        
-        # Compute Q, K, V
-        q = self.q_proj(normed).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(normed).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(normed).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        
-        # Bidirectional attention (no causal mask)
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) / self.scale
-        
-        # Apply attention mask if provided
-        if attention_mask is not None:
-            # Expand mask for broadcasting: [batch, 1, 1, seq_len]
-            mask = attention_mask.unsqueeze(1).unsqueeze(2)
-            attn_weights = attn_weights.masked_fill(~mask, float('-inf'))
-        
-        attn_weights = F.softmax(attn_weights, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-        
-        attn_output = torch.matmul(attn_weights, v)
-        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_dim)
-        attn_output = self.out_proj(attn_output)
-        
-        # Residual connection
-        x = x + self.dropout(attn_output)
-        
-        # MLP with pre-norm and residual
-        x = x + self.dropout(self.mlp(self.norm2(x)))
-        
-        return x
+from .attention_blocks import BidirectionalAttentionBlock
 
 
 class SchemaDiffusionHead(nn.Module):
     def __init__(self, input_dim, vocab_size, hidden_dim=1024, num_layers=2, num_steps=4,
-                 label_smoothing=0.1, use_bidirectional=True, num_heads=8):
+                 label_smoothing=0.1, use_bidirectional=True, num_heads=8,
+                 null_loss_weight=0.3, null_prediction_penalty=0.0):
         """
         Args:
             input_dim: Dimension of hidden states from base model
@@ -110,6 +37,8 @@ class SchemaDiffusionHead(nn.Module):
         self.vocab_size = vocab_size
         self.label_smoothing = label_smoothing
         self.use_bidirectional = use_bidirectional
+        self.null_loss_weight = null_loss_weight
+        self.null_prediction_penalty = null_prediction_penalty
 
         self.noise = LogLinearNoise()
 
@@ -323,21 +252,32 @@ class SchemaDiffusionHead(nn.Module):
         if self.null_token_id is not None and active_labels.numel() > 0:
             sample_weights = torch.ones_like(active_labels, dtype=torch.float)
             null_mask = active_labels == self.null_token_id
-            sample_weights[null_mask] = 0.3
-
+            sample_weights[null_mask] = self.null_loss_weight
+            
             loss_unreduced = F.cross_entropy(
                 active_logits,
                 active_labels,
                 label_smoothing=self.label_smoothing,
                 reduction="none",
             )
-            return (loss_unreduced * sample_weights).sum() / sample_weights.sum()
-
-        return F.cross_entropy(
-            active_logits,
-            active_labels,
+            loss = (loss_unreduced * sample_weights).sum() / sample_weights.sum()
+        else:
+            loss = F.cross_entropy(
+                active_logits, 
+                active_labels,
             label_smoothing=self.label_smoothing,
-        )
+            )
+        if (self.null_token_id is not None
+                and self.null_prediction_penalty > 0
+                and active_logits.numel() > 0):
+            probs = F.softmax(active_logits, dim=-1)
+            null_probs = probs[:, self.null_token_id]
+            non_null_mask = active_labels != self.null_token_id
+            if non_null_mask.any():
+                penalty = null_probs[non_null_mask].mean() * self.null_prediction_penalty
+                loss = loss + penalty
+
+        return loss
 
     def forward(self, hidden_states, current_tokens, step_ids, scaffold_mask=None):
         """

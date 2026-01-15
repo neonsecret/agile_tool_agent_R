@@ -82,7 +82,8 @@ def estimate_field_length(
 def calculate_field_budget(
     estimated_length: int,
     min_budget: int = MIN_FIELD_BUDGET,
-    max_budget: int = DEFAULT_MAX_BUDGET
+    max_budget: int = DEFAULT_MAX_BUDGET,
+    extra_budget: int = 0
 ) -> int:
     """
     Calculate actual budget for a field.
@@ -98,14 +99,16 @@ def calculate_field_budget(
     Returns:
         Budget size in tokens
     """
-    return min(max(estimated_length, min_budget), max_budget)
+    budget = estimated_length + extra_budget
+    return min(max(budget, min_budget), max_budget)
 
 
 def build_fields_from_schema(
     schema: Dict[str, Any],
     tokenizer: PreTrainedTokenizerBase,
     min_budget: int = MIN_FIELD_BUDGET,
-    max_budget: int = DEFAULT_MAX_BUDGET
+    max_budget: int = DEFAULT_MAX_BUDGET,
+    extra_budget: int = 0
 ) -> List[Tuple[str, int]]:
     """
     Automatically build fields list from tool schema with proper budgeting.
@@ -152,7 +155,12 @@ def build_fields_from_schema(
         estimated_len = estimate_field_length(field_name, field_spec, tokenizer)
         
         # Calculate budget (matches training)
-        budget = calculate_field_budget(estimated_len, min_budget, max_budget)
+        budget = calculate_field_budget(
+            estimated_len,
+            min_budget=min_budget,
+            max_budget=max_budget,
+            extra_budget=extra_budget,
+        )
         
         fields.append((field_name, budget))
     
