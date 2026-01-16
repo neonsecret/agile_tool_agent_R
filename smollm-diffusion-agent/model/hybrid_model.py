@@ -22,7 +22,7 @@ from data.device_utils import get_device, get_device_map_for_quantization
 
 class HybridSmolLM(nn.Module):
     def __init__(self, base_model_id="HuggingFaceTB/SmolLM3-3B", load_in_4bit=False,
-                 diffusion_config=None, vocab_size=None, use_unsloth=None,
+                 diffusion_config=None, vocab_size=None, use_unsloth=None, 
                  max_seq_length=2048, enable_unsloth_inference_opt=True,
                  device: torch.device | None = None):
         super().__init__()
@@ -48,6 +48,7 @@ class HybridSmolLM(nn.Module):
         num_heads = diffusion_config.get("num_heads", 8)
         null_loss_weight = diffusion_config.get("null_loss_weight", 0.3)
         null_prediction_penalty = diffusion_config.get("null_prediction_penalty", 0.0)
+        entropy_weight = diffusion_config.get("entropy_weight", 0.05)
 
         self.diffusion_head = SchemaDiffusionHead(
             input_dim=hidden_size,
@@ -60,6 +61,7 @@ class HybridSmolLM(nn.Module):
             num_heads=num_heads,
             null_loss_weight=null_loss_weight,
             null_prediction_penalty=null_prediction_penalty,
+            entropy_weight=entropy_weight,
         )
 
         self.diffusion_head = self.diffusion_head.to(dtype=torch.bfloat16)

@@ -47,6 +47,10 @@ class GenerationConfig:
     clear_cache: bool = True
     show_steps: bool = False
     use_cuda_graph: bool = True
+    # Running Confidence Remasking (RCR) - allows token revision
+    enable_remasking: bool = True
+    remask_ratio: float = 0.2  # Fraction of low-confidence tokens to remask
+    min_lock_confidence: float = 0.7  # Min confidence to keep token locked
 
 
 @dataclass
@@ -426,6 +430,11 @@ class FunctionCallGenerator:
             generation_trace: List[TraceStep] = []
             mask_positions = torch.zeros_like(sequence, dtype=torch.bool)
 
+            # Running Confidence Remasking (RCR) state
+            seq_len = sequence.shape[1]
+            running_max_conf = torch.full((seq_len,), float('-inf'), device=self.device)
+            revealed_positions = torch.zeros(seq_len, dtype=torch.bool, device=self.device)
+
             hidden_states_cached = self.diffusion_ops._cache_hidden_states(
                 sequence, scaffold_mask, template.mask_token_id,
             )
@@ -454,13 +463,15 @@ class FunctionCallGenerator:
                     cfg.use_cuda_graph, self.cuda_graph_runner
                 )
 
-                logits[:, :, template.mask_token_id] = -float('inf')
-
                 if cfg.show_steps and step == 0:
                     mask_logits = logits[0, mask_indices]
-                    print(f"  Logits stats: mean={mask_logits.mean():.4f}, std={mask_logits.std():.4f}")
-                    print(f"  Logits range: [{mask_logits.min():.4f}, {mask_logits.max():.4f}]")
-                    print(f"  Mask token logit (ID {template.mask_token_id}): {mask_logits[0, template.mask_token_id]:.4f}")
+                    valid_mask = torch.ones_like(mask_logits, dtype=torch.bool)
+                    valid_mask[:, template.mask_token_id] = False
+                    valid_logits = mask_logits[valid_mask]
+                    print(f"  Logits stats: mean={valid_logits.mean():.4f}, std={valid_logits.std():.4f}")
+                    print(f"  Logits range: [{valid_logits.min():.4f}, {valid_logits.max():.4f}]")
+
+                logits[:, :, template.mask_token_id] = -float('inf')
 
                 if cfg.show_steps and step <= 1:
                     with torch.no_grad():
@@ -489,6 +500,12 @@ class FunctionCallGenerator:
                 ).squeeze(-1)
                 del log_probs
 
+                # Update running max confidence for masked positions
+                running_max_conf[mask_indices] = torch.maximum(
+                    running_max_conf[mask_indices],
+                    mask_conf
+                )
+
                 remaining = mask_indices.numel()
                 remaining_steps = cfg.steps - step
                 if remaining_steps <= 1:
@@ -497,9 +514,9 @@ class FunctionCallGenerator:
                     k = min(budget, remaining)
 
                 topk = torch.topk(mask_conf, k)
-                del mask_conf
-
                 selected = mask_indices[topk.indices]
+                selected_conf = mask_conf[topk.indices]
+                del mask_conf
 
                 if cfg.show_steps:
                     revealed_token_ids = predictions[0, selected].cpu().tolist()
@@ -510,7 +527,44 @@ class FunctionCallGenerator:
                 del mask_indices, topk
 
                 sequence[0, selected] = predictions[0, selected]
+                revealed_positions[selected] = True
                 del predictions
+
+                # Running Confidence Remasking (RCR) - allow token revision
+                if cfg.enable_remasking and step < cfg.steps - 1:
+                    # Find revealed tokens with low running confidence
+                    revealed_indices = torch.nonzero(
+                        revealed_positions & scaffold_mask[0], as_tuple=False
+                    ).squeeze(-1)
+
+                    if revealed_indices.numel() > 0:
+                        revealed_conf = running_max_conf[revealed_indices]
+                        # Convert log probs to probs for threshold comparison
+                        revealed_probs = torch.exp(revealed_conf)
+
+                        # Remask tokens below confidence threshold
+                        low_conf_mask = revealed_probs < cfg.min_lock_confidence
+
+                        if low_conf_mask.any():
+                            # Remask only a fraction to avoid oscillation
+                            num_to_remask = max(1, int(low_conf_mask.sum() * cfg.remask_ratio))
+                            low_conf_indices = revealed_indices[low_conf_mask]
+
+                            if low_conf_indices.numel() > 0:
+                                # Select lowest confidence tokens to remask
+                                low_conf_values = revealed_conf[low_conf_mask]
+                                _, worst_indices = torch.topk(
+                                    low_conf_values, min(num_to_remask, low_conf_indices.numel()),
+                                    largest=False
+                                )
+                                remask_positions = low_conf_indices[worst_indices]
+
+                                # Remask these tokens
+                                sequence[0, remask_positions] = template.mask_token_id
+                                revealed_positions[remask_positions] = False
+
+                                if cfg.show_steps:
+                                    print(f"  RCR: Remasking {len(remask_positions)} low-confidence tokens")
 
                 if cfg.show_steps:
                     response_tokens_step = sequence[0, prompt_length:].cpu()

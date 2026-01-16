@@ -28,7 +28,10 @@ from data.metrics import (
 )
 
 from train_utils import load_config, build_collate_fn, load_checkpoint
-from train_eval import evaluate, _compute_null_counts, _null_metrics_from_counts, _sum_across_processes
+from train_eval import (
+    evaluate, _compute_null_counts, _null_metrics_from_counts,
+    _sum_across_processes, _compute_diversity_counts
+)
 from train_functional import functional_evaluation
 
 def train():
@@ -271,7 +274,7 @@ def train():
                 for k, v in losses_detail.items():
                     logs[f"train/{k}_loss"] = v.item() if torch.is_tensor(v) else v
                 
-                # Add NULL token metrics every 50 steps
+                # Add NULL token and diversity metrics every 50 steps
                 if global_step % 50 == 0 and "logits" in outputs:
                     with torch.no_grad():
                         logits = outputs["logits"]
@@ -282,7 +285,12 @@ def train():
                             batch["scaffold_mask"],
                             null_token_id,
                         )
+                        div_counts = _compute_diversity_counts(
+                            predictions,
+                            batch["scaffold_mask"],
+                        )
                         if counts is not None:
+                            counts.update(div_counts)
                             for key, value in counts.items():
                                 counts[key] = _sum_across_processes(value, accelerator)
                             null_metrics = _null_metrics_from_counts(counts)

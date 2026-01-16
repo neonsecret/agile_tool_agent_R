@@ -1,7 +1,5 @@
 """
-Demo and example usage for inference pipeline.
-
-Shows how to use the FunctionCallGenerator with automatic budgeting.
+Demo for diffusion-based function call generation.
 """
 
 import os
@@ -71,10 +69,15 @@ def demo_inference():
     model_kwargs['vocab_size'] = len(tokenizer)
     
     model = HybridSmolLM(**model_kwargs)
+    
+    try:
+        model.to(device)
+    except NotImplementedError:
+        print("Model has meta/offloaded tensors, skipping explicit .to() call")
 
     if os.path.exists(checkpoint_path):
         print(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
 
         checkpoint_state = checkpoint['model_state_dict']
         model_state = model.state_dict()
@@ -90,28 +93,24 @@ def demo_inference():
                         filtered_state[key] = value.cpu()
                         loaded_keys.append(key)
                     else:
-                        skipped_keys.append(f"{key} (shape mismatch: {model_state[key].shape} vs {value.shape})")
+                        skipped_keys.append(f"{key} (shape mismatch)")
                 else:
                     skipped_keys.append(f"{key} (not in model)")
-            elif key.startswith('router_head.'):
-                skipped_keys.append(f"{key} (router removed)")
             else:
                 skipped_keys.append(f"{key} (base_llm, skipped)")
 
         if filtered_state:
+            filtered_state = {k: v.to(device) for k, v in filtered_state.items()}
             model.load_state_dict(filtered_state, strict=False)
-            print(f"Loaded {len(loaded_keys)} trainable head weights from checkpoint")
-            if skipped_keys:
-                print(f"Skipped {len(skipped_keys)} keys (base_llm or incompatible)")
+            print(f"Loaded {len(loaded_keys)} diffusion head weights from checkpoint")
         else:
-            print("Warning: No compatible weights found in checkpoint, using untrained heads")
+            print("Warning: No compatible weights found, using untrained model")
 
         if 'epoch' in checkpoint:
             print(f"Checkpoint info: epoch {checkpoint['epoch']}, eval loss: {checkpoint.get('eval_loss', 'N/A')}")
     else:
         print(f"No checkpoint found at {checkpoint_path}, using untrained model")
 
-    model.to(device)
     model.eval()
     
     model.diffusion_head.set_mask_token_id(mask_token_id)
@@ -163,7 +162,7 @@ def demo_inference():
         }
     }
 
-    config = GenerationConfig(
+    gen_config = GenerationConfig(
         steps=steps,
         temperature=temperature,
         cfg_scale=cfg_scale,
@@ -172,32 +171,7 @@ def demo_inference():
     )
     
     print("\n" + "="*80)
-    print("UNIFIED PIPELINE DEMO")
-    print("="*80)
-    
-    result = generator.generate_unified(
-        prompt=prompt,
-        tool_registry=tool_registry,
-        config=config,
-    )
-    
-    print(f"\n{'='*80}")
-    print("RESULT")
-    print("="*80)
-    print(f"Mode: {result['mode']}")
-    if 'decision' in result:
-        print(f"Decision: {result['decision']}")
-    if 'tool_name' in result:
-        print(f"Tool: {result['tool_name']}")
-    if 'tool_call' in result:
-        print(f"Tool Call: {result['tool_call']}")
-    if 'response' in result:
-        print(f"Response: {result['response']}")
-    if 'steps_executed' in result:
-        print(f"Steps: {result['steps_executed']}")
-    
-    print(f"\n{'='*80}")
-    print("DIRECT TOOL MODE (no routing)")
+    print("TOOL CALL GENERATION")
     print("="*80)
     
     tool_schema = tool_registry["get_weather"]
@@ -230,12 +204,15 @@ def demo_inference():
     output = generator.generate(
         prompt=prompt,
         template=template,
-        config=config,
+        config=gen_config,
         trace=True,
         tool_name="get_weather"
     )
 
-    print(f"\nGenerated text: {output.text}")
+    print(f"\n{'='*80}")
+    print("RESULT")
+    print("="*80)
+    print(f"Generated text: {output.text}")
     print(f"Steps executed: {output.steps_executed}")
 
 

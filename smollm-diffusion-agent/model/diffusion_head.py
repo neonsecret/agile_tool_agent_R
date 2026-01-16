@@ -19,7 +19,7 @@ from .attention_blocks import BidirectionalAttentionBlock
 class SchemaDiffusionHead(nn.Module):
     def __init__(self, input_dim, vocab_size, hidden_dim=1024, num_layers=2, num_steps=4,
                  label_smoothing=0.1, use_bidirectional=True, num_heads=8,
-                 null_loss_weight=0.3, null_prediction_penalty=0.0):
+                 null_loss_weight=0.3, null_prediction_penalty=0.0, entropy_weight=0.05):
         """
         Args:
             input_dim: Dimension of hidden states from base model
@@ -30,6 +30,7 @@ class SchemaDiffusionHead(nn.Module):
             label_smoothing: Label smoothing factor (0.0 = no smoothing, 0.1 = 10% smoothing)
             use_bidirectional: If True, use bidirectional attention; else use residual MLPs
             num_heads: Number of attention heads (only used if use_bidirectional=True)
+            entropy_weight: Weight for entropy regularization (prevents token collapse)
         """
         super().__init__()
         self.num_steps = num_steps
@@ -39,6 +40,7 @@ class SchemaDiffusionHead(nn.Module):
         self.use_bidirectional = use_bidirectional
         self.null_loss_weight = null_loss_weight
         self.null_prediction_penalty = null_prediction_penalty
+        self.entropy_weight = entropy_weight
 
         self.noise = LogLinearNoise()
 
@@ -197,7 +199,7 @@ class SchemaDiffusionHead(nn.Module):
         active_logits = logits[valid_mask_positions]
         active_labels = tokens[valid_mask_positions]
         
-        loss = self._compute_loss(active_logits, active_labels)
+        loss = self._compute_loss(active_logits, active_labels, t.mean())
 
         return loss
 
@@ -238,7 +240,7 @@ class SchemaDiffusionHead(nn.Module):
 
         active_logits = logits[valid_mask_positions]
         active_labels = tokens[valid_mask_positions]
-        loss = self._compute_loss(active_logits, active_labels)
+        loss = self._compute_loss(active_logits, active_labels, t.mean())
 
         return {
             "loss": loss,
@@ -248,11 +250,20 @@ class SchemaDiffusionHead(nn.Module):
             "t": t,
         }
 
-    def _compute_loss(self, active_logits, active_labels):
+    def _compute_loss(self, active_logits, active_labels, t_mean=None):
         if self.null_token_id is not None and active_labels.numel() > 0:
+            # Dynamic NULL weighting based on timestep
+            # At high t (early diffusion): more NULLs expected, higher weight
+            # At low t (late diffusion): fewer NULLs, lower weight
+            if t_mean is not None:
+                t_scalar = t_mean.item() if hasattr(t_mean, 'item') else float(t_mean)
+                dynamic_null_weight = self.null_loss_weight * (0.3 + 0.7 * t_scalar)
+            else:
+                dynamic_null_weight = self.null_loss_weight
+
             sample_weights = torch.ones_like(active_labels, dtype=torch.float)
             null_mask = active_labels == self.null_token_id
-            sample_weights[null_mask] = self.null_loss_weight
+            sample_weights[null_mask] = dynamic_null_weight
             
             loss_unreduced = F.cross_entropy(
                 active_logits,
@@ -265,17 +276,25 @@ class SchemaDiffusionHead(nn.Module):
             loss = F.cross_entropy(
                 active_logits, 
                 active_labels,
-            label_smoothing=self.label_smoothing,
+                label_smoothing=self.label_smoothing,
             )
+
+        probs = F.softmax(active_logits, dim=-1)
+
+        # NULL prediction penalty
         if (self.null_token_id is not None
                 and self.null_prediction_penalty > 0
                 and active_logits.numel() > 0):
-            probs = F.softmax(active_logits, dim=-1)
             null_probs = probs[:, self.null_token_id]
             non_null_mask = active_labels != self.null_token_id
             if non_null_mask.any():
                 penalty = null_probs[non_null_mask].mean() * self.null_prediction_penalty
                 loss = loss + penalty
+
+        # Entropy regularization (prevents token collapse/repetition)
+        if self.entropy_weight > 0 and active_logits.numel() > 0:
+            entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1).mean()
+            loss = loss - self.entropy_weight * entropy
 
         return loss
 

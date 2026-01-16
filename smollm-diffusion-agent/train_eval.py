@@ -56,12 +56,35 @@ def _null_metrics_from_counts(counts):
     real_token_accuracy = real_correct / real_total if real_total > 0 else 0.0
     null_precision = null_correct / null_pred if null_pred > 0 else 0.0
     null_recall = null_correct / null_label if null_label > 0 else 0.0
-    return {
+    metrics = {
         "null_prediction_rate": null_prediction_rate,
         "null_accuracy": null_accuracy,
         "real_token_accuracy": real_token_accuracy,
         "null_precision": null_precision,
         "null_recall": null_recall,
+    }
+    if "unique_tokens" in counts and "pred_tokens" in counts:
+        unique = counts["unique_tokens"].item()
+        total = counts["pred_tokens"].item()
+        metrics["token_diversity"] = unique / total if total > 0 else 0.0
+    if "repetitions" in counts:
+        reps = counts["repetitions"].item()
+        total = counts["pred_tokens"].item() if "pred_tokens" in counts else total_masked
+        metrics["token_repetition_rate"] = reps / max(1, total - 1)
+    return metrics
+
+
+def _compute_diversity_counts(predictions, mask_positions):
+    pred_masked = predictions[mask_positions]
+    if pred_masked.numel() == 0:
+        return {"unique_tokens": torch.tensor(0), "pred_tokens": torch.tensor(0), "repetitions": torch.tensor(0)}
+    unique = torch.unique(pred_masked).numel()
+    total = pred_masked.numel()
+    consecutive_same = (pred_masked[1:] == pred_masked[:-1]).sum()
+    return {
+        "unique_tokens": torch.tensor(unique, device=predictions.device),
+        "pred_tokens": torch.tensor(total, device=predictions.device),
+        "repetitions": consecutive_same,
     }
 
 
