@@ -64,6 +64,7 @@ class HybridSmolLM(nn.Module):
         null_prediction_penalty = diffusion_config.get("null_prediction_penalty", 0.0)
         entropy_weight = diffusion_config.get("entropy_weight", 0.05)
         use_optimized_attention = diffusion_config.get("use_optimized_attention", True)
+        training_temperature = diffusion_config.get("training_temperature", 1.0)
 
         self.diffusion_head = SchemaDiffusionHead(
             input_dim=hidden_size,
@@ -78,6 +79,7 @@ class HybridSmolLM(nn.Module):
             null_prediction_penalty=null_prediction_penalty,
             entropy_weight=entropy_weight,
             use_optimized_attention=use_optimized_attention,
+            training_temperature=training_temperature,
         )
 
         self.diffusion_head = self.diffusion_head.to(dtype=torch.bfloat16)

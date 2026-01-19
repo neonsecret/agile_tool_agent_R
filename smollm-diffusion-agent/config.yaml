@@ -31,7 +31,8 @@ diffusion:
   use_optimized_attention: true  # Use SDPA-optimized attention (2-3x faster, FlashAttention on CUDA)
   null_loss_weight: 0.1  # Down-weight NULL labels to avoid NULL-dominant solutions
   null_prediction_penalty: 0.3  # Penalize NULL predictions on non-NULL labels
-  entropy_weight: 0.05  # Entropy regularization to prevent token collapse (λ=0.03-0.07 recommended)
+  entropy_weight: 0.07  # Entropy regularization to prevent token collapse (increased from 0.05 due to severe collapse)
+  training_temperature: 1.5  # Temperature scaling during training (>1.0 smooths predictions, encourages exploration)
 
 # Training Configuration
 training:

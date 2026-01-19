@@ -24,7 +24,7 @@ class SchemaDiffusionHead(nn.Module):
     def __init__(self, input_dim, vocab_size, hidden_dim=1024, num_layers=2, num_steps=4,
                  label_smoothing=0.1, use_bidirectional=True, num_heads=8,
                  null_loss_weight=0.3, null_prediction_penalty=0.0, entropy_weight=0.05,
-                 use_optimized_attention=True):
+                 use_optimized_attention=True, training_temperature=1.0):
         """
         Args:
             input_dim: Dimension of hidden states from base model
@@ -37,6 +37,7 @@ class SchemaDiffusionHead(nn.Module):
             num_heads: Number of attention heads (only used if use_bidirectional=True)
             entropy_weight: Weight for entropy regularization (prevents token collapse)
             use_optimized_attention: If True, use SDPA-optimized attention (2-3x faster)
+            training_temperature: Temperature for logits during training (>1.0 smooths, <1.0 sharpens)
         """
         super().__init__()
         self.num_steps = num_steps
@@ -48,6 +49,7 @@ class SchemaDiffusionHead(nn.Module):
         self.null_prediction_penalty = null_prediction_penalty
         self.entropy_weight = entropy_weight
         self.use_optimized_attention = use_optimized_attention
+        self.training_temperature = training_temperature
 
         self.noise = LogLinearNoise()
 
@@ -257,6 +259,12 @@ class SchemaDiffusionHead(nn.Module):
         }
 
     def _compute_loss(self, active_logits, active_labels, t_mean=None):
+        # Apply temperature scaling during training for exploration
+        if self.training and self.training_temperature != 1.0:
+            scaled_logits = active_logits / self.training_temperature
+        else:
+            scaled_logits = active_logits
+
         if self.null_token_id is not None and active_labels.numel() > 0:
             # Dynamic NULL weighting based on timestep
             # At high t (early diffusion): more NULLs expected, higher weight
@@ -276,7 +284,7 @@ class SchemaDiffusionHead(nn.Module):
             sample_weights[null_mask] = dynamic_null_weight
             
             loss_unreduced = F.cross_entropy(
-                active_logits,
+                scaled_logits,
                 active_labels,
                 label_smoothing=self.label_smoothing,
                 reduction="none",
@@ -284,12 +292,13 @@ class SchemaDiffusionHead(nn.Module):
             loss = (loss_unreduced * sample_weights).sum() / sample_weights.sum()
         else:
             loss = F.cross_entropy(
-                active_logits, 
+                scaled_logits, 
                 active_labels,
                 label_smoothing=self.label_smoothing,
             )
 
-        probs = F.softmax(active_logits, dim=-1)
+        # Use scaled logits for all probability-based computations
+        probs = F.softmax(scaled_logits, dim=-1)
 
         # NULL prediction penalty
         if (self.null_token_id is not None
