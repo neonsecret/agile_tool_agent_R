@@ -241,7 +241,8 @@ def train():
 
             if np.isnan(loss_val):
                 print(f"\nNaN loss at batch {batch_idx}!")
-                print(f"Batch: input_ids={batch['input_ids'].shape}, scaffold_sum={float(mx.sum(batch['scaffold_mask']))}")
+                print(
+                    f"Batch: input_ids={batch['input_ids'].shape}, scaffold_sum={float(mx.sum(batch['scaffold_mask']))}")
                 if debug_info:
                     print(f"Debug: {debug_info}")
                 labels = batch['labels'][0][:30].astype(mx.int32)

@@ -16,10 +16,11 @@ class UnifiedExample:
         conversations: List[Dict[str, str]] with keys "from" and "value"
         tools: List[Dict] or str (JSON string of tool schemas)
     """
+
     def __init__(self, conversations: List[Dict[str, str]], tools: Any):
         self.conversations = conversations
         self.tools = tools
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "conversations": self.conversations,
@@ -33,6 +34,7 @@ class HermesReasoningAdapter:
     
     Already in the correct format, just pass through.
     """
+
     @staticmethod
     def convert(example: Dict[str, Any]) -> UnifiedExample:
         return UnifiedExample(
@@ -55,23 +57,24 @@ class XLAMAdapter:
         - conversations: [{"from": "human", "value": query}, {"from": "gpt", "value": <tool_call>...}]
         - tools: tools (JSON string)
     """
+
     @staticmethod
     def convert(example: Dict[str, Any]) -> UnifiedExample:
         query = example.get("query", "")
         answers_str = example.get("answers", "[]")
         tools = example.get("tools", "[]")
-        
+
         # Parse answers
         try:
             answers = json.loads(answers_str) if isinstance(answers_str, str) else answers_str
         except json.JSONDecodeError:
             answers = []
-        
+
         # Build conversations
         conversations = [
             {"from": "human", "value": query}
         ]
-        
+
         # Format tool calls in SmolLM3 format
         if answers and len(answers) > 0:
             tool_calls_text = []
@@ -86,10 +89,10 @@ class XLAMAdapter:
                     tool_calls_text.append(
                         f"<tool_call>\n{json.dumps(tool_call, indent=2)}\n</tool_call>"
                     )
-            
+
             assistant_response = "\n\n".join(tool_calls_text)
             conversations.append({"from": "gpt", "value": assistant_response})
-        
+
         return UnifiedExample(
             conversations=conversations,
             tools=tools
@@ -107,19 +110,20 @@ class GlaiveV2Adapter:
     
     Converts to unified format.
     """
+
     @staticmethod
     def convert(example: Dict[str, Any]) -> UnifiedExample:
         system = example.get("system", "")
         chat = example.get("chat", "")
         functions = example.get("functions", [])
-        
+
         # Parse chat string into conversations
         conversations = []
-        
+
         # Add system message if present
         if system:
             conversations.append({"from": "system", "value": system})
-        
+
         # Try to parse chat (format varies, handle gracefully)
         if chat:
             # Simple heuristic: split by "USER:" and "ASSISTANT:" markers
@@ -127,7 +131,7 @@ class GlaiveV2Adapter:
             parts = re.split(r'(USER:|ASSISTANT:)', chat)
             current_role = None
             current_text = []
-            
+
             for part in parts:
                 if part == "USER:":
                     if current_role and current_text:
@@ -148,17 +152,17 @@ class GlaiveV2Adapter:
                 else:
                     if part.strip():
                         current_text.append(part.strip())
-            
+
             # Add final turn
             if current_role and current_text:
                 conversations.append({
                     "from": current_role,
                     "value": " ".join(current_text).strip()
                 })
-        
+
         # Convert functions to JSON string
         tools_str = json.dumps(functions) if functions else "[]"
-        
+
         return UnifiedExample(
             conversations=conversations,
             tools=tools_str
@@ -171,6 +175,7 @@ class NousHermesAdapter:
     
     Similar to Hermes reasoning but may have slight format differences.
     """
+
     @staticmethod
     def convert(example: Dict[str, Any]) -> UnifiedExample:
         # Check if it has the standard format
@@ -179,7 +184,7 @@ class NousHermesAdapter:
                 conversations=example.get("conversations", []),
                 tools=example.get("tools", "[]")
             )
-        
+
         # Alternative format: messages field
         if "messages" in example:
             messages = example.get("messages", [])
@@ -194,12 +199,12 @@ class NousHermesAdapter:
                     conversations.append({"from": "gpt", "value": content})
                 elif role == "system":
                     conversations.append({"from": "system", "value": content})
-            
+
             return UnifiedExample(
                 conversations=conversations,
                 tools=example.get("tools", "[]")
             )
-        
+
         # Fallback: empty conversations
         return UnifiedExample(conversations=[], tools="[]")
 

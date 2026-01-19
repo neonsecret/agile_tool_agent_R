@@ -240,7 +240,6 @@ def main():
 
     verify_alignment(batch, mask_token_id, null_token_id, tokenizer)
 
-
     print_section("SUMMARY")
     print("Check the above output for any ⚠️ warnings")
 

@@ -20,7 +20,7 @@ import json
 
 class TestFormatAdapters:
     """Test each dataset format adapter."""
-    
+
     def test_hermes_adapter(self):
         """Test Hermes reasoning adapter (pass-through)."""
         example = {
@@ -30,12 +30,12 @@ class TestFormatAdapters:
             ],
             "tools": "[{\"name\": \"get_weather\"}]"
         }
-        
+
         unified = HermesReasoningAdapter.convert(example)
         assert len(unified.conversations) == 2
         assert unified.conversations[0]["from"] == "human"
         assert unified.tools == example["tools"]
-    
+
     def test_xlam_adapter(self):
         """Test XLAM dataset adapter."""
         example = {
@@ -44,19 +44,19 @@ class TestFormatAdapters:
             "answers": '[{"name": "live_giveaways", "arguments": {"type": "beta"}}]',
             "tools": '[{"name": "live_giveaways", "description": "..."}]'
         }
-        
+
         unified = XLAMAdapter.convert(example)
-        
+
         # Should have 2 turns: user + assistant
         assert len(unified.conversations) >= 1
         assert unified.conversations[0]["from"] == "human"
         assert unified.conversations[0]["value"] == example["query"]
-        
+
         # Assistant response should contain <tool_call>
         if len(unified.conversations) > 1:
             assert "<tool_call>" in unified.conversations[1]["value"]
             assert "live_giveaways" in unified.conversations[1]["value"]
-    
+
     def test_xlam_adapter_multiple_calls(self):
         """Test XLAM with multiple tool calls."""
         example = {
@@ -65,16 +65,16 @@ class TestFormatAdapters:
             "answers": '[{"name": "tool1", "arguments": {"arg": 1}}, {"name": "tool2", "arguments": {"arg": 2}}]',
             "tools": "[]"
         }
-        
+
         unified = XLAMAdapter.convert(example)
         assert len(unified.conversations) == 2
-        
+
         # Should have both tool calls
         response = unified.conversations[1]["value"]
         assert response.count("<tool_call>") == 2
         assert "tool1" in response
         assert "tool2" in response
-    
+
     def test_glaive_adapter(self):
         """Test Glaive v2 adapter."""
         example = {
@@ -82,17 +82,17 @@ class TestFormatAdapters:
             "chat": "USER: Hello\nASSISTANT: Hi there!",
             "functions": [{"name": "test_function"}]
         }
-        
+
         unified = GlaiveV2Adapter.convert(example)
-        
+
         # Should parse conversations
         assert len(unified.conversations) >= 2
-        
+
         # Tools should be JSON string
         tools = json.loads(unified.tools)
         assert len(tools) == 1
         assert tools[0]["name"] == "test_function"
-    
+
     def test_nous_hermes_adapter_conversations(self):
         """Test Nous Hermes adapter with conversations field."""
         example = {
@@ -102,10 +102,10 @@ class TestFormatAdapters:
             ],
             "tools": "[]"
         }
-        
+
         unified = NousHermesAdapter.convert(example)
         assert len(unified.conversations) == 2
-    
+
     def test_nous_hermes_adapter_messages(self):
         """Test Nous Hermes adapter with messages field."""
         example = {
@@ -115,12 +115,12 @@ class TestFormatAdapters:
             ],
             "tools": "[]"
         }
-        
+
         unified = NousHermesAdapter.convert(example)
         assert len(unified.conversations) == 2
         assert unified.conversations[0]["from"] == "human"
         assert unified.conversations[1]["from"] == "gpt"
-    
+
     def test_get_adapter(self):
         """Test adapter registry."""
         assert get_adapter("Salesforce/xlam-function-calling-60k") == XLAMAdapter
@@ -131,7 +131,7 @@ class TestFormatAdapters:
 @pytest.mark.slow
 class TestMultiDatasetLoader:
     """Test multi-dataset loading (requires network)."""
-    
+
     def test_load_xlam_sample(self):
         """Load a small sample from XLAM dataset."""
         config = MultiDatasetConfig(
@@ -140,13 +140,13 @@ class TestMultiDatasetLoader:
             weight=1.0,
             limit=10  # Only 10 examples for testing
         )
-        
+
         examples = load_and_unify_dataset(config)
-        
+
         assert len(examples) == 10
         assert all("conversations" in ex for ex in examples)
         assert all("tools" in ex for ex in examples)
-    
+
     def test_load_hermes_sample(self):
         """Load a small sample from Hermes dataset."""
         config = MultiDatasetConfig(
@@ -155,9 +155,9 @@ class TestMultiDatasetLoader:
             weight=1.0,
             limit=10
         )
-        
+
         examples = load_and_unify_dataset(config)
-        
+
         assert len(examples) == 10
         assert all("conversations" in ex for ex in examples)
 
@@ -194,7 +194,7 @@ class TestMultiDatasetLoader:
 
 class TestManualInspection:
     """Manual inspection helpers (run with -s to see output)."""
-    
+
     @pytest.mark.slow
     def test_print_xlam_samples(self):
         """Print XLAM samples for manual review."""
@@ -203,19 +203,19 @@ class TestManualInspection:
             split="train",
             limit=3
         )
-        
+
         examples = load_and_unify_dataset(config)
-        
-        print("\n" + "="*80)
+
+        print("\n" + "=" * 80)
         print("XLAM SAMPLES")
-        print("="*80)
+        print("=" * 80)
         for i, ex in enumerate(examples):
-            print(f"\nExample {i+1}:")
+            print(f"\nExample {i + 1}:")
             print(f"Conversations: {len(ex['conversations'])} turns")
             for turn in ex['conversations']:
                 print(f"  {turn['from']}: {turn['value'][:100]}...")
             print(f"Tools: {ex['tools'][:200]}...")
-    
+
     @pytest.mark.slow
     def test_compare_formats(self):
         """Compare formats side-by-side."""
@@ -229,17 +229,17 @@ class TestManualInspection:
             split="train",
             limit=2
         )
-        
+
         xlam_examples = load_and_unify_dataset(xlam_config)
         hermes_examples = load_and_unify_dataset(hermes_config)
-        
-        print("\n" + "="*80)
+
+        print("\n" + "=" * 80)
         print("FORMAT COMPARISON")
-        print("="*80)
-        
+        print("=" * 80)
+
         print("\nXLAM Example:")
         print(json.dumps(xlam_examples[0], indent=2))
-        
+
         print("\nHermes Example:")
         print(json.dumps(hermes_examples[0], indent=2))
 

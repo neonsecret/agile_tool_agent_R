@@ -27,7 +27,7 @@ from data.device_utils import get_device, get_device_map_for_quantization
 
 class HybridSmolLM(nn.Module):
     def __init__(self, base_model_id="HuggingFaceTB/SmolLM3-3B", load_in_4bit=False,
-                 diffusion_config=None, vocab_size=None, use_unsloth=None, 
+                 diffusion_config=None, vocab_size=None, use_unsloth=None,
                  max_seq_length=2048, enable_unsloth_inference_opt=True,
                  device: torch.device | None = None,
                  use_flash_attention=True, use_gradient_checkpointing=False,
@@ -99,18 +99,18 @@ class HybridSmolLM(nn.Module):
         if load_in_4bit and not cuda_available:
             print("Warning: 4-bit quantization requires CUDA, falling back to bfloat16")
             load_in_4bit = False
-        
+
         if use_unsloth and self.use_flash_attention and cuda_available:
             print("Warning: unsloth has built-in optimizations, disabling FlashAttention to avoid conflicts")
             self.use_flash_attention = False
-        
+
         if use_unsloth and self.use_gradient_checkpointing and cuda_available:
             print("Warning: unsloth manages memory efficiently, disabling gradient checkpointing")
             self.use_gradient_checkpointing = False
 
         if use_unsloth and UNSLOTH_AVAILABLE:
             print(f"Loading model with unsloth on CUDA (max_seq_length={max_seq_length})")
-            
+
             unsloth_kwargs = {
                 "model_name": base_model_id,
                 "max_seq_length": max_seq_length,
@@ -118,18 +118,18 @@ class HybridSmolLM(nn.Module):
                 "load_in_4bit": load_in_4bit,
                 "load_in_8bit": False,
             }
-            
+
             if self.unsloth_use_gradient_checkpointing is not None:
                 unsloth_kwargs["use_gradient_checkpointing"] = self.unsloth_use_gradient_checkpointing
                 if self.unsloth_use_gradient_checkpointing == "unsloth":
                     print("  Using unsloth gradient checkpointing (offloads activations to RAM, saves VRAM)")
-            
+
             if self.unsloth_rope_scaling is not None:
                 unsloth_kwargs["rope_scaling"] = self.unsloth_rope_scaling
                 print(f"  RoPE scaling: {self.unsloth_rope_scaling}")
-            
+
             self.base_llm, _ = FastLanguageModel.from_pretrained(**unsloth_kwargs)
-            
+
             if enable_unsloth_inference_opt:
                 FastLanguageModel.for_inference(self.base_llm)
                 print("Unsloth inference optimizations enabled (2x faster)")
@@ -142,7 +142,7 @@ class HybridSmolLM(nn.Module):
             kwargs = {
                 "torch_dtype": torch.bfloat16,
             }
-            
+
             if self.use_flash_attention and device.type == "cuda":
                 kwargs["attn_implementation"] = "flash_attention_2"
                 print("Enabling FlashAttention-2 for base model")
@@ -170,14 +170,14 @@ class HybridSmolLM(nn.Module):
 
             self.base_llm = AutoModelForCausalLM.from_pretrained(base_model_id, **kwargs)
             self.use_unsloth = False
-            
+
             if self.use_gradient_checkpointing:
                 try:
                     self.base_llm.gradient_checkpointing_enable()
                     logger.info("Gradient checkpointing enabled for base model (saves memory)")
                 except AttributeError as e:
                     logger.warning(f"Model does not support gradient_checkpointing_enable: {e}")
-            
+
             if self.use_better_transformer and device.type == "cuda" and not load_in_4bit:
                 try:
                     from optimum.bettertransformer import BetterTransformer
@@ -190,7 +190,6 @@ class HybridSmolLM(nn.Module):
 
         for param in self.base_llm.parameters():
             param.requires_grad = False
-
 
     def get_hidden_states(self, input_ids, attention_mask, output_hidden_states=False,
                           use_cache=False, past_key_values=None, position_ids=None):

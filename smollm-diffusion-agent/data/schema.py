@@ -61,7 +61,7 @@ class SchemaTemplate:
 
 
 def _encode_append(
-    tokenizer: PreTrainedTokenizerBase, buffer: List[int], text_parts: List[str], text: str
+        tokenizer: PreTrainedTokenizerBase, buffer: List[int], text_parts: List[str], text: str
 ) -> None:
     if not text:
         return
@@ -70,12 +70,12 @@ def _encode_append(
 
 
 def build_schema_template(
-    tokenizer: PreTrainedTokenizerBase,
-    fields: Sequence[Tuple[str, int]],
-    mask_token: str,
-    null_token: Optional[str] = None,
-    include_codeblock: bool = True,
-    indent: str = "  ",
+        tokenizer: PreTrainedTokenizerBase,
+        fields: Sequence[Tuple[str, int]],
+        mask_token: str,
+        null_token: Optional[str] = None,
+        include_codeblock: bool = True,
+        indent: str = "  ",
 ) -> SchemaTemplate:
     """
     Construct a schema template for the provided fields.
@@ -100,7 +100,7 @@ def build_schema_template(
     mask_token_id = tokenizer.convert_tokens_to_ids(mask_token)
     if mask_token_id is None or mask_token_id < 0:
         raise ValueError(f"Mask token '{mask_token}' is not in the tokenizer vocabulary.")
-    
+
     null_token_id = None
     if null_token is not None:
         null_token_id = tokenizer.convert_tokens_to_ids(null_token)

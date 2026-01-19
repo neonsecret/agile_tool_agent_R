@@ -44,4 +44,3 @@ def get_device_map_for_quantization(device: torch.device):
         return None
     else:
         return None
-

@@ -17,36 +17,36 @@ from data.smollm3_prompting import (
 
 class GenerationOperations:
     """Handles all generation operations for the inference pipeline."""
-    
+
     def __init__(
-        self,
-        model,
-        tokenizer: AutoTokenizer,
-        device: torch.device,
-        system_message_tool: str = "/no_think",
-        system_message_chat: str = "/think",
+            self,
+            model,
+            tokenizer: AutoTokenizer,
+            device: torch.device,
+            system_message_tool: str = "/no_think",
+            system_message_chat: str = "/think",
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self._system_message_tool = system_message_tool
         self._system_message_chat = system_message_chat
-    
+
     def _build_messages(self, prompt: str, system_message: str) -> List[Dict[str, str]]:
         return [
             {"role": "system", "content": system_message},
             {"role": "user", "content": prompt},
         ]
-    
+
     def _generate_base(
-        self,
-        prompt: str,
-        tools: Optional[Sequence[Dict[str, Any]]] = None,
-        system_message: Optional[str] = None,
-        max_new_tokens: int = 256,
-        do_sample: bool = False,
-        temperature: float = 0.0,
-        top_p: float = 1.0,
+            self,
+            prompt: str,
+            tools: Optional[Sequence[Dict[str, Any]]] = None,
+            system_message: Optional[str] = None,
+            max_new_tokens: int = 256,
+            do_sample: bool = False,
+            temperature: float = 0.0,
+            top_p: float = 1.0,
     ) -> Tuple[str, str]:
         """
         Generate using the frozen base model with SmolLM3's official chat template.
@@ -114,7 +114,7 @@ class GenerationOperations:
         )
         del raw
         return clean.strip()
-    
+
     def generate_think(self, prompt: str, max_new_tokens: int = 512) -> str:
         raw, clean = self._generate_base(
             prompt,
@@ -127,9 +127,9 @@ class GenerationOperations:
         )
         del raw
         return clean.strip()
-    
+
     def select_tool_call(
-        self, prompt: str, tool_registry: Dict[str, Any]
+            self, prompt: str, tool_registry: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """
         Use SmolLM3's official tool calling template to decide whether to call a tool.

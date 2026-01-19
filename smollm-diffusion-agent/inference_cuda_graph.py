@@ -12,7 +12,7 @@ from data.device_utils import synchronize
 
 class CUDAGraphRunner:
     """Manages CUDA graph capture and execution for diffusion head."""
-    
+
     def __init__(self, model, device: torch.device, use_cuda_graph: bool = True):
         self.model = model
         self.device = device
@@ -20,13 +20,13 @@ class CUDAGraphRunner:
         self._cuda_graph: Optional[torch.cuda.CUDAGraph] = None
         self._graph_inputs: Dict[str, torch.Tensor] = {}
         self._graph_outputs: Optional[torch.Tensor] = None
-    
+
     def _is_cuda_graph_supported(self) -> bool:
         return self.device.type == "cuda" and torch.cuda.is_available()
-    
+
     def is_enabled(self) -> bool:
         return self._cuda_graph_enabled
-    
+
     def setup(self, hidden_states: torch.Tensor,
               current_tokens: torch.Tensor, t: torch.Tensor):
         """Capture CUDA graph for diffusion head forward pass."""
@@ -59,7 +59,7 @@ class CUDAGraphRunner:
         """Execute captured CUDA graph with new inputs."""
         if self._cuda_graph is None:
             self.setup(hidden_states, current_tokens, t)
-        
+
         if self._cuda_graph is not None:
             if (hidden_states.shape == self._graph_inputs['hidden_states'].shape and
                     current_tokens.shape == self._graph_inputs['current_tokens'].shape):
@@ -74,7 +74,7 @@ class CUDAGraphRunner:
                 return self.model.diffusion_head.predict(hidden_states, current_tokens, t)
         else:
             return self.model.diffusion_head.predict(hidden_states, current_tokens, t)
-    
+
     def clear(self):
         """Clear CUDA graph state."""
         self._cuda_graph = None

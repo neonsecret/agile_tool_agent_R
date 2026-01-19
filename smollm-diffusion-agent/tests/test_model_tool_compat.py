@@ -48,10 +48,10 @@ class TestChatTemplateToolInjection:
                 }
             }
         ]
-        
+
         ids = apply_smollm3_chat_template(tokenizer, messages, tools=tools)
         text = tokenizer.decode(ids, skip_special_tokens=False)
-        
+
         # SmolLM3's template should include tool schema in the system section
         assert "get_weather" in text
         assert "location" in text
@@ -68,10 +68,10 @@ class TestChatTemplateToolInjection:
             {"name": "calculate", "description": "Do math", "parameters": {}},
             {"name": "translate", "description": "Translate text", "parameters": {}},
         ]
-        
+
         ids = apply_smollm3_chat_template(tokenizer, messages, tools=tools)
         text = tokenizer.decode(ids, skip_special_tokens=False)
-        
+
         assert "search" in text
         assert "calculate" in text
         assert "translate" in text
@@ -99,10 +99,10 @@ class TestBaseModelToolGeneration:
                 }
             }
         ]
-        
+
         ids = apply_smollm3_chat_template(tokenizer, messages, tools=tools)
         input_ids = torch.tensor([ids], device=model.device)
-        
+
         with torch.no_grad():
             output = model.generate(
                 input_ids,
@@ -110,13 +110,13 @@ class TestBaseModelToolGeneration:
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id,
             )
-        
+
         generated = tokenizer.decode(output[0, len(ids):], skip_special_tokens=False)
         print(f"Generated: {generated}")
-        
+
         # The model should generate a tool call
         parsed = parse_first_tool_call(generated)
-        
+
         # Note: An untrained/base model might not always produce valid tool calls,
         # but the format should be recognizable if it tries
         if parsed is not None:
@@ -137,10 +137,10 @@ class TestBaseModelToolGeneration:
                 "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}
             }
         ]
-        
+
         ids = apply_smollm3_chat_template(tokenizer, messages, tools=tools)
         input_ids = torch.tensor([ids], device=model.device)
-        
+
         with torch.no_grad():
             output = model.generate(
                 input_ids,
@@ -148,10 +148,10 @@ class TestBaseModelToolGeneration:
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id,
             )
-        
+
         generated = tokenizer.decode(output[0, len(ids):], skip_special_tokens=False)
         print(f"Generated for simple question: {generated}")
-        
+
         # Model may or may not use a tool for this - we just verify it generates something
         assert len(generated.strip()) > 0
 
@@ -176,7 +176,7 @@ class TestToolSchemaFormats:
                             }
                         },
                         "arrival": {
-                            "type": "object", 
+                            "type": "object",
                             "properties": {
                                 "city": {"type": "string"}
                             }
@@ -185,10 +185,10 @@ class TestToolSchemaFormats:
                 }
             }
         ]
-        
+
         ids = apply_smollm3_chat_template(tokenizer, messages, tools=tools)
         text = tokenizer.decode(ids, skip_special_tokens=False)
-        
+
         assert "book_flight" in text
         assert "departure" in text or "city" in text
 
@@ -210,10 +210,10 @@ class TestToolSchemaFormats:
                 }
             }
         ]
-        
+
         ids = apply_smollm3_chat_template(tokenizer, messages, tools=tools)
         text = tokenizer.decode(ids, skip_special_tokens=False)
-        
+
         assert "send_emails" in text
         assert "recipients" in text
 

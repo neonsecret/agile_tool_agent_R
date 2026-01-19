@@ -90,7 +90,6 @@ def main():
         null_count = (batch["labels"] == null_token_id).sum().item()
         print(f"\nNULL token id {null_token_id} count in labels: {null_count}")
 
-
     # Show first available template text if present
     try:
         tpl = None
@@ -210,7 +209,6 @@ def main():
         null_count = (batch["labels"] == null_token_id).sum().item()
         print(f"\nNULL token id {null_token_id} count in labels: {null_count}")
 
-
     # Show template text if available
     try:
         print("\nSample template text:")
@@ -224,4 +222,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

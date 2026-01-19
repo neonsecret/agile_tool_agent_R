@@ -33,7 +33,7 @@ class TestDatasetLoading:
     def test_dataset_loads(self, tokenizer, mask_token, null_token):
         mask_str, _ = mask_token
         null_str, _ = null_token
-        
+
         dataset = SmartScaffoldDataset(
             tokenizer=tokenizer,
             split="train",
@@ -43,14 +43,14 @@ class TestDatasetLoading:
             null_token=null_str,
             chat_sampling_rate=0.1,
         )
-        
+
         assert len(dataset) > 0
         print(f"Dataset loaded with {len(dataset)} examples")
 
     def test_dataset_item_structure(self, tokenizer, mask_token, null_token):
         mask_str, _ = mask_token
         null_str, _ = null_token
-        
+
         dataset = SmartScaffoldDataset(
             tokenizer=tokenizer,
             split="train",
@@ -59,15 +59,15 @@ class TestDatasetLoading:
             mask_token=mask_str,
             null_token=null_str,
         )
-        
+
         item = dataset[0]
-        
+
         assert "input_ids" in item
         assert "attention_mask" in item
         assert "scaffold_mask" in item
         assert "labels" in item
         assert "is_tool" in item
-        
+
         assert isinstance(item["input_ids"], torch.Tensor)
         assert item["input_ids"].dtype == torch.long
         assert item["scaffold_mask"].dtype == torch.bool
@@ -76,7 +76,7 @@ class TestDatasetLoading:
         mask_str, _ = mask_token
         null_str, _ = null_token
         max_len = 512
-        
+
         dataset = SmartScaffoldDataset(
             tokenizer=tokenizer,
             split="train",
@@ -85,7 +85,7 @@ class TestDatasetLoading:
             mask_token=mask_str,
             null_token=null_str,
         )
-        
+
         for i in range(min(10, len(dataset))):
             item = dataset[i]
             assert len(item["input_ids"]) <= max_len, f"Item {i} exceeds max_seq_len"
@@ -96,7 +96,7 @@ class TestScaffoldMask:
     def test_scaffold_mask_marks_mask_tokens(self, tokenizer, mask_token, null_token):
         mask_str, mask_id = mask_token
         null_str, _ = null_token
-        
+
         dataset = SmartScaffoldDataset(
             tokenizer=tokenizer,
             split="train",
@@ -105,7 +105,7 @@ class TestScaffoldMask:
             mask_token=mask_str,
             null_token=null_str,
         )
-        
+
         # Find a tool call example (is_tool=True)
         tool_example = None
         for i in range(len(dataset)):
@@ -113,16 +113,16 @@ class TestScaffoldMask:
             if item["is_tool"]:
                 tool_example = item
                 break
-        
+
         if tool_example is None:
             pytest.skip("No tool call examples found in sampled data")
-        
+
         scaffold_mask = tool_example["scaffold_mask"]
         input_ids = tool_example["input_ids"]
-        
+
         # Scaffold mask should have True values
         assert scaffold_mask.any(), "No scaffold positions marked"
-        
+
         # Positions marked in scaffold_mask should have mask_token_id in input_ids
         masked_positions = scaffold_mask.nonzero(as_tuple=True)[0]
         for pos in masked_positions:
@@ -131,7 +131,7 @@ class TestScaffoldMask:
     def test_labels_align_with_scaffold_mask(self, tokenizer, mask_token, null_token):
         mask_str, _ = mask_token
         null_str, null_id = null_token
-        
+
         dataset = SmartScaffoldDataset(
             tokenizer=tokenizer,
             split="train",
@@ -140,7 +140,7 @@ class TestScaffoldMask:
             mask_token=mask_str,
             null_token=null_str,
         )
-        
+
         # Find a tool call example
         tool_example = None
         for i in range(len(dataset)):
@@ -148,17 +148,17 @@ class TestScaffoldMask:
             if item["is_tool"]:
                 tool_example = item
                 break
-        
+
         if tool_example is None:
             pytest.skip("No tool call examples found")
-        
+
         scaffold_mask = tool_example["scaffold_mask"]
         labels = tool_example["labels"]
-        
+
         # Positions NOT in scaffold should have labels = -100
         non_scaffold = ~scaffold_mask
         assert (labels[non_scaffold] == -100).all(), "Non-scaffold positions should be ignored (-100)"
-        
+
         # Positions IN scaffold should have valid labels (>= 0 or null_token_id)
         scaffold_positions = scaffold_mask.nonzero(as_tuple=True)[0]
         for pos in scaffold_positions:
@@ -172,7 +172,7 @@ class TestChatVsToolExamples:
     def test_chat_examples_have_empty_scaffold(self, tokenizer, mask_token, null_token):
         mask_str, _ = mask_token
         null_str, _ = null_token
-        
+
         dataset = SmartScaffoldDataset(
             tokenizer=tokenizer,
             split="train",
@@ -182,7 +182,7 @@ class TestChatVsToolExamples:
             null_token=null_str,
             chat_sampling_rate=0.5,
         )
-        
+
         # Find a chat example (is_tool=False)
         chat_example = None
         for i in range(len(dataset)):
@@ -190,10 +190,10 @@ class TestChatVsToolExamples:
             if item["is_tool"] == False:
                 chat_example = item
                 break
-        
+
         if chat_example is None:
             pytest.skip("No chat examples found")
-        
+
         # Chat examples should have no scaffold positions
         assert not chat_example["scaffold_mask"].any(), "Chat examples shouldn't have scaffold"
         assert (chat_example["labels"] == -100).all(), "Chat examples should have all labels=-100"
@@ -201,7 +201,7 @@ class TestChatVsToolExamples:
     def test_tool_examples_have_scaffold(self, tokenizer, mask_token, null_token):
         mask_str, _ = mask_token
         null_str, _ = null_token
-        
+
         dataset = SmartScaffoldDataset(
             tokenizer=tokenizer,
             split="train",
@@ -210,17 +210,17 @@ class TestChatVsToolExamples:
             mask_token=mask_str,
             null_token=null_str,
         )
-        
+
         tool_example = None
         for i in range(len(dataset)):
             item = dataset[i]
             if item["is_tool"]:
                 tool_example = item
                 break
-        
+
         if tool_example is None:
             pytest.skip("No tool call examples found")
-        
+
         assert tool_example["scaffold_mask"].any(), "Tool examples should have scaffold positions"
 
 
@@ -229,10 +229,10 @@ class TestTruncation:
     def test_truncation_preserves_scaffold(self, tokenizer, mask_token, null_token):
         mask_str, mask_id = mask_token
         null_str, _ = null_token
-        
+
         # Use moderately short max_seq_len to force prompt truncation while fitting scaffold
         short_len = 512
-        
+
         dataset = SmartScaffoldDataset(
             tokenizer=tokenizer,
             split="train",
@@ -241,13 +241,13 @@ class TestTruncation:
             mask_token=mask_str,
             null_token=null_str,
         )
-        
+
         for i in range(min(10, len(dataset))):
             item = dataset[i]
             if item["is_tool"]:  # Tool example
                 input_ids = item["input_ids"]
                 scaffold_mask = item["scaffold_mask"]
-                
+
                 # Check that scaffold positions exist and have mask tokens
                 if scaffold_mask.any():
                     masked_positions = scaffold_mask.nonzero(as_tuple=True)[0]
@@ -260,7 +260,7 @@ class TestToolCallWrapper:
     def test_tool_call_wrapper_in_sequence(self, tokenizer, mask_token, null_token):
         mask_str, _ = mask_token
         null_str, _ = null_token
-        
+
         dataset = SmartScaffoldDataset(
             tokenizer=tokenizer,
             split="train",
@@ -269,20 +269,20 @@ class TestToolCallWrapper:
             mask_token=mask_str,
             null_token=null_str,
         )
-        
+
         tool_example = None
         for i in range(len(dataset)):
             item = dataset[i]
             if item["is_tool"]:
                 tool_example = item
                 break
-        
+
         if tool_example is None:
             pytest.skip("No tool call examples found")
-        
+
         # Decode and check for tool_call markers
         text = tokenizer.decode(tool_example["input_ids"], skip_special_tokens=False)
-        
+
         assert "<tool_call>" in text, "Tool example should contain <tool_call>"
         assert "</tool_call>" in text, "Tool example should contain </tool_call>"
         assert '"name":' in text, "Tool example should contain tool name"

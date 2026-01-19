@@ -82,7 +82,7 @@ class SchemaDiffusionHead(nn.Module):
     def set_mask_token_id(self, mask_token_id):
         """Set the mask token ID (should be called during initialization)."""
         self.mask_token_id = mask_token_id
-    
+
     def set_null_token_id(self, null_token_id):
         """Set the NULL token ID for self-adaptive masking."""
         self.null_token_id = null_token_id
@@ -206,7 +206,7 @@ class SchemaDiffusionHead(nn.Module):
 
         active_logits = logits[valid_mask_positions]
         active_labels = tokens[valid_mask_positions]
-        
+
         loss = self._compute_loss(active_logits, active_labels, t.mean())
 
         return loss
@@ -282,7 +282,7 @@ class SchemaDiffusionHead(nn.Module):
             sample_weights = torch.ones_like(active_labels, dtype=torch.float)
             null_mask = active_labels == self.null_token_id
             sample_weights[null_mask] = dynamic_null_weight
-            
+
             loss_unreduced = F.cross_entropy(
                 scaled_logits,
                 active_labels,
@@ -292,7 +292,7 @@ class SchemaDiffusionHead(nn.Module):
             loss = (loss_unreduced * sample_weights).sum() / sample_weights.sum()
         else:
             loss = F.cross_entropy(
-                scaled_logits, 
+                scaled_logits,
                 active_labels,
                 label_smoothing=self.label_smoothing,
             )

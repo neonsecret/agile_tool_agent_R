@@ -36,10 +36,10 @@ def resolve_mask_token(tokenizer: PreTrainedTokenizerBase, mask_token_config=Non
             if mask_token_id is None:
                 mask_token_str = tokenizer.eos_token
                 mask_token_id = tokenizer.eos_token_id
-    
+
     if tokenizer.mask_token is None:
         tokenizer.mask_token = mask_token_str
-    
+
     return mask_token_str, mask_token_id
 
 
@@ -79,7 +79,7 @@ def resolve_null_token(tokenizer: PreTrainedTokenizerBase, null_token_config=Non
             raise ValueError(
                 f"NULL token '{null_token_str}' not found in tokenizer vocabulary."
             )
-    
+
     return null_token_str, null_token_id
 
 
@@ -101,4 +101,3 @@ def validate_mask_token_consistency(model_mask_token_id, template_mask_token_id,
             f"model has {model_mask_token_id}, template has {template_mask_token_id}. "
             "Ensure both use the same mask token configuration."
         )
-

@@ -15,10 +15,10 @@ class ToolCallParts:
 
 
 def apply_smollm3_chat_template(
-    tokenizer: PreTrainedTokenizerBase,
-    messages: Sequence[Dict[str, str]],
-    tools: Optional[Sequence[Dict[str, Any]]] = None,
-    add_generation_prompt: bool = True,
+        tokenizer: PreTrainedTokenizerBase,
+        messages: Sequence[Dict[str, str]],
+        tools: Optional[Sequence[Dict[str, Any]]] = None,
+        add_generation_prompt: bool = True,
 ) -> List[int]:
     """
     Apply SmolLM3's tokenizer chat template with optional tool injection.
@@ -50,8 +50,8 @@ def apply_smollm3_chat_template(
 
 
 def encode_tool_call_wrapper(
-    tokenizer: PreTrainedTokenizerBase,
-    tool_name: str,
+        tokenizer: PreTrainedTokenizerBase,
+        tool_name: str,
 ) -> ToolCallParts:
     """
     Return token IDs for a SmolLM3-compatible tool call wrapper.
@@ -85,4 +85,3 @@ def parse_first_tool_call(text: str) -> Optional[Dict[str, Any]]:
         return json.loads(payload)
     except json.JSONDecodeError:
         return None
-

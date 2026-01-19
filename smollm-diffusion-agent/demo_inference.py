@@ -11,7 +11,8 @@ from model.hybrid_model import HybridSmolLM
 from data.schema import build_schema_template
 from data.utils import resolve_mask_token, resolve_null_token, validate_mask_token_consistency
 from data.budget_utils import build_fields_from_schema, print_budget_info, MIN_FIELD_BUDGET, DEFAULT_MAX_BUDGET
-from data.config_utils import validate_and_adjust_config, get_model_kwargs, get_inference_kwargs, print_device_capabilities
+from data.config_utils import validate_and_adjust_config, get_model_kwargs, get_inference_kwargs, \
+    print_device_capabilities
 from data.device_utils import get_device
 from inference_utils import load_config
 
@@ -24,12 +25,12 @@ def demo_inference():
 
     config = load_config()
     config = validate_and_adjust_config(config, device)
-    
+
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM3-3B")
 
     inference_cfg = config.get("inference", {})
     inference_kwargs = get_inference_kwargs(config, device)
-    
+
     steps = inference_cfg.get("steps", 4)
     temperature = inference_cfg.get("temperature", 0.0)
     cfg_scale = inference_cfg.get("cfg_scale", 0.0)
@@ -43,7 +44,7 @@ def demo_inference():
 
     null_token_config = data_cfg.get("null_token", None)
     null_token_str, null_token_id = resolve_null_token(tokenizer, null_token_config)
-    
+
     dynamic_budget_cfg = data_cfg.get("dynamic_budget", {})
     max_field_budget = dynamic_budget_cfg.get(
         "max_tokens",
@@ -67,9 +68,9 @@ def demo_inference():
 
     model_kwargs = get_model_kwargs(config, device)
     model_kwargs['vocab_size'] = len(tokenizer)
-    
+
     model = HybridSmolLM(**model_kwargs)
-    
+
     try:
         model.to(device)
     except NotImplementedError:
@@ -112,7 +113,7 @@ def demo_inference():
         print(f"No checkpoint found at {checkpoint_path}, using untrained model")
 
     model.eval()
-    
+
     model.diffusion_head.set_mask_token_id(mask_token_id)
 
     if null_token_id is not None:
@@ -131,7 +132,7 @@ def demo_inference():
     print(f"Optimizations: torch.compile={use_torch_compile}, cuda_graph={use_cuda_graph}")
 
     prompt = "What's the weather in London?"
-    
+
     tool_registry = {
         "get_weather": {
             "name": "get_weather",
@@ -169,11 +170,11 @@ def demo_inference():
         show_steps=True,
         use_cuda_graph=use_cuda_graph
     )
-    
-    print("\n" + "="*80)
+
+    print("\n" + "=" * 80)
     print("TOOL CALL GENERATION")
-    print("="*80)
-    
+    print("=" * 80)
+
     tool_schema = tool_registry["get_weather"]
     fields = build_fields_from_schema(
         tool_schema,
@@ -181,7 +182,7 @@ def demo_inference():
         min_budget=min_field_budget,
         max_budget=max_field_budget
     )
-    
+
     print("\nAutomatic budget calculation:")
     print_budget_info(fields)
 
@@ -209,9 +210,9 @@ def demo_inference():
         tool_name="get_weather"
     )
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("RESULT")
-    print("="*80)
+    print("=" * 80)
     print(f"Generated text: {output.text}")
     print(f"Steps executed: {output.steps_executed}")
 

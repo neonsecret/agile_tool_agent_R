@@ -40,7 +40,7 @@ training:
   learning_rate: 1.0e-4
   num_epochs: 8
   gradient_accumulation_steps: 4
-  max_seq_len: 2048  # Increased from 1024: median=1198, 90th percentile=2278
+  max_seq_len: 2048  # median=556, 90th percentile=1270, 95th percentile=1742
   max_new_tokens: 256
   seed: 42
   use_wandb: true
@@ -111,5 +111,5 @@ data:
   system_message: "/no_think"  # SmolLM3 chat_template uses /think or /no_think in system message
   max_history_messages: 12     # Keep last N chat messages before the tool call to fit max_seq_len
   chat_sampling_rate: 0.1  # Sampling rate for chat examples (non-tool calls). 0.1 = 10% of chat turns
-  bucket_sizes: [512, 1024, 1536, 2048]  # Fixed buckets for padding/compile stability
+  bucket_sizes: [ 512, 1024, 1536, 2048 ]  # Fixed buckets for padding/compile stability
 

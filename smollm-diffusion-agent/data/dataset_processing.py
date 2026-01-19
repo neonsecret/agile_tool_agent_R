@@ -38,10 +38,10 @@ def map_role(role: str) -> str:
 
 
 def build_messages(
-    conversations: Sequence[Dict[str, Any]],
-    msg_idx: int,
-    system_message: str,
-    max_history_messages: int,
+        conversations: Sequence[Dict[str, Any]],
+        msg_idx: int,
+        system_message: str,
+        max_history_messages: int,
 ) -> List[Dict[str, str]]:
     """
     Build a SmolLM3-compatible `messages` list for tokenizer.apply_chat_template.

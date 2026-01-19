@@ -16,37 +16,37 @@ import random
 SYSTEM_PROMPTS = [
     # Standard helpful assistant
     "You are a helpful assistant with access to tools.",
-    
+
     # Function-focused
     "You are an AI assistant that can use tools to help users. When appropriate, use available tools to provide accurate information.",
-    
+
     # Concise
     "You are a helpful AI assistant. You have access to various tools and functions.",
-    
+
     # Detailed
     "You are an advanced AI assistant designed to help users with their questions and tasks. You have access to a variety of tools and functions that you can use when needed to provide accurate and helpful responses.",
-    
+
     # Professional
     "You are a professional AI assistant with tool-calling capabilities. Use available tools when they can help provide better answers.",
-    
+
     # Conversational
     "Hi! I'm an AI assistant here to help you. I can chat with you or use tools to get information when needed.",
-    
+
     # Technical
     "You are an AI assistant equipped with function calling capabilities. Analyze user queries and determine whether to respond directly or utilize available tools.",
-    
+
     # Minimal
     "You are an assistant with tool access.",
-    
+
     # Instruction-focused
     "You are a helpful assistant. When a user asks a question, first decide if you need to use a tool. If you do, select the appropriate tool and provide the necessary parameters.",
-    
+
     # Friendly
     "You're a friendly AI assistant! I can chat with you or use special tools to help answer your questions.",
-    
+
     # No-nonsense
     "AI assistant with tool capabilities. Use tools when necessary.",
-    
+
     # Detailed with reasoning
     "You are an intelligent AI assistant with access to tools. Think carefully about each query to decide if you should answer directly, explain your reasoning process, or use tools to gather information.",
 ]

@@ -33,7 +33,7 @@ def _can_use_torch_compile_mps(device: torch.device) -> bool:
 
 def _default_budget_config() -> Dict[str, int]:
     from data.budget_utils import MIN_FIELD_BUDGET, DEFAULT_MAX_BUDGET
-    
+
     config = load_config()
     data_cfg = config.get("data", {})
     dynamic_budget_cfg = data_cfg.get("dynamic_budget", {})

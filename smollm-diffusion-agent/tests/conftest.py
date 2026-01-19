@@ -42,14 +42,14 @@ def shared_base_model(shared_tokenizer, shared_device):
     Loads once and shares across all test modules.
     """
     from transformers import AutoModelForCausalLM
-    
+
     if shared_device.type == "mps":
         dtype = torch.float16
     elif shared_device.type == "cuda":
         dtype = torch.bfloat16
     else:
         dtype = torch.float32
-    
+
     model = AutoModelForCausalLM.from_pretrained(
         "HuggingFaceTB/SmolLM3-3B",
         torch_dtype=dtype,
@@ -65,9 +65,9 @@ def shared_hybrid_model(shared_tokenizer, shared_device):
     """Session-scoped hybrid model for slow tests."""
     from model.hybrid_model import HybridSmolLM
     from data.utils import resolve_mask_token, resolve_null_token
-    
+
     use_4bit = shared_device.type == "cuda"
-    
+
     model = HybridSmolLM(
         base_model_id="HuggingFaceTB/SmolLM3-3B",
         load_in_4bit=use_4bit,
@@ -79,17 +79,17 @@ def shared_hybrid_model(shared_tokenizer, shared_device):
         vocab_size=len(shared_tokenizer),
         use_unsloth=False,
     )
-    
+
     mask_str, mask_id = resolve_mask_token(shared_tokenizer, None)
     model.diffusion_head.set_mask_token_id(mask_id)
-    
+
     null_str, null_id = resolve_null_token(shared_tokenizer, None)
     if null_id is not None:
         model.diffusion_head.set_null_token_id(null_id)
-    
+
     # Move diffusion head to same device as base LLM
     base_device = next(model.base_llm.parameters()).device
     model.diffusion_head = model.diffusion_head.to(base_device)
-    
+
     model.eval()
     return model

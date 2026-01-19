@@ -32,6 +32,7 @@ from train_eval import (
 )
 from train_functional import functional_evaluation
 
+
 def train():
     # Load Config
     config = load_config()
@@ -178,7 +179,7 @@ def train():
     # 4. Optimizer
     # Only optimize diffusion head parameters
     params_to_optimize = list(model.diffusion_head.parameters())
-    
+
     optimizer = AdamW(params_to_optimize, lr=float(training_cfg["learning_rate"]))
 
     # 5. Prepare
@@ -274,7 +275,7 @@ def train():
                 logs = {"train/total_loss": loss_val, "train/step": global_step}
                 for k, v in losses_detail.items():
                     logs[f"train/{k}_loss"] = v.item() if torch.is_tensor(v) else v
-                
+
                 # Add NULL token and diversity metrics every 50 steps
                 if global_step % 50 == 0 and "logits" in outputs:
                     with torch.no_grad():

@@ -14,19 +14,19 @@ from data.budget_utils import DEFAULT_MAX_BUDGET
 
 class DiffusionOperations:
     """Handles all diffusion-related operations for inference."""
-    
+
     def __init__(
-        self,
-        model,
-        tokenizer,
-        device: torch.device,
-        max_seq_len: int = 2048,
+            self,
+            model,
+            tokenizer,
+            device: torch.device,
+            max_seq_len: int = 2048,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self.max_seq_len = max_seq_len
-    
+
     def _strip_null_tokens(self, tokens: torch.Tensor, null_token_id: Optional[int]) -> torch.Tensor:
         """Strip NULL tokens from output for variable-length field handling.
         
@@ -44,14 +44,14 @@ class DiffusionOperations:
             return tokens
         mask = tokens != null_token_id
         return tokens[mask]
-    
+
     def _build_prompt_parts(
-        self,
-        prompt: str,
-        tool_name: str,
-        tools: Optional[List[Dict[str, Any]]],
-        system_message: str,
-        messages_builder,
+            self,
+            prompt: str,
+            tool_name: str,
+            tools: Optional[List[Dict[str, Any]]],
+            system_message: str,
+            messages_builder,
     ) -> Tuple[List[int], List[int], List[int]]:
         tool_call_parts = encode_tool_call_wrapper(self.tokenizer, tool_name)
         prefix_ids = tool_call_parts.prefix_ids
@@ -76,11 +76,11 @@ class DiffusionOperations:
         return prompt_ids_list[-keep:]
 
     def _build_sequence(
-        self,
-        prompt_ids_list: List[int],
-        prefix_ids: List[int],
-        suffix_ids: List[int],
-        template: SchemaTemplate,
+            self,
+            prompt_ids_list: List[int],
+            prefix_ids: List[int],
+            suffix_ids: List[int],
+            template: SchemaTemplate,
     ) -> Tuple[torch.Tensor, int, int]:
         tail_len = len(prefix_ids) + len(template.tokens) + len(suffix_ids)
         prompt_ids_list = self._truncate_prompt_ids(prompt_ids_list, tail_len)
@@ -96,11 +96,11 @@ class DiffusionOperations:
         return sequence, prompt_length, prefix_length
 
     def _build_scaffold_mask(
-        self,
-        sequence: torch.Tensor,
-        prompt_length: int,
-        prefix_length: int,
-        template: SchemaTemplate,
+            self,
+            sequence: torch.Tensor,
+            prompt_length: int,
+            prefix_length: int,
+            template: SchemaTemplate,
     ) -> torch.Tensor:
         scaffold_mask = torch.zeros_like(sequence, dtype=torch.bool, device=self.device)
         for segment in template.field_segments:
@@ -109,10 +109,10 @@ class DiffusionOperations:
         return scaffold_mask
 
     def _cache_hidden_states(
-        self,
-        sequence: torch.Tensor,
-        scaffold_mask: torch.Tensor,
-        mask_token_id: int,
+            self,
+            sequence: torch.Tensor,
+            scaffold_mask: torch.Tensor,
+            mask_token_id: int,
     ) -> torch.Tensor:
         attention_mask = torch.ones_like(sequence)
         masked_sequence = sequence.clone()
@@ -128,12 +128,12 @@ class DiffusionOperations:
         return hidden_states_cached
 
     def _predict_from_cached_hidden_states(
-        self,
-        hidden_states: torch.Tensor,
-        current_tokens: torch.Tensor,
-        t: torch.Tensor,
-        use_cuda_graph: bool,
-        cuda_graph_runner,
+            self,
+            hidden_states: torch.Tensor,
+            current_tokens: torch.Tensor,
+            t: torch.Tensor,
+            use_cuda_graph: bool,
+            cuda_graph_runner,
     ) -> torch.Tensor:
         """
         Predict logits using cached base hidden states.
@@ -154,32 +154,32 @@ class DiffusionOperations:
 
 class TemplateExpansionOperations:
     """Handles template expansion for dynamic budgeting."""
-    
+
     def __init__(
-        self,
-        tokenizer,
-        generator,
+            self,
+            tokenizer,
+            generator,
     ):
         self.tokenizer = tokenizer
         self.generator = generator
-    
+
     @property
     def expansion_config(self):
         """Access live expansion_config from parent generator."""
         return self.generator.expansion_config
-    
+
     @property
     def budget_config(self):
         """Access live budget_config from parent generator."""
         return self.generator.budget_config
-    
+
     def _detect_overflow_fields(
-        self,
-        sequence: torch.Tensor,
-        prompt_length: int,
-        prefix_length: int,
-        template: SchemaTemplate,
-        null_token_id: Optional[int],
+            self,
+            sequence: torch.Tensor,
+            prompt_length: int,
+            prefix_length: int,
+            template: SchemaTemplate,
+            null_token_id: Optional[int],
     ) -> List[str]:
         if null_token_id is None:
             return []
@@ -204,9 +204,9 @@ class TemplateExpansionOperations:
         return fields
 
     def _expand_template(
-        self,
-        template: SchemaTemplate,
-        fields_to_expand: List[str],
+            self,
+            template: SchemaTemplate,
+            fields_to_expand: List[str],
     ) -> Optional[SchemaTemplate]:
         expand_tokens = self.expansion_config.get("expand_tokens", 0)
         if not fields_to_expand or expand_tokens <= 0:
@@ -233,20 +233,20 @@ class TemplateExpansionOperations:
             null_token=template.null_token,
             include_codeblock=include_codeblock,
         )
-    
+
     def _template_has_codeblock(self, template: SchemaTemplate) -> bool:
         return template.text.lstrip().startswith("```json")
 
     def _apply_warm_start(
-        self,
-        old_sequence: torch.Tensor,
-        old_template: SchemaTemplate,
-        old_prompt_length: int,
-        old_prefix_length: int,
-        new_sequence: torch.Tensor,
-        new_template: SchemaTemplate,
-        new_prompt_length: int,
-        new_prefix_length: int,
+            self,
+            old_sequence: torch.Tensor,
+            old_template: SchemaTemplate,
+            old_prompt_length: int,
+            old_prefix_length: int,
+            new_sequence: torch.Tensor,
+            new_template: SchemaTemplate,
+            new_prompt_length: int,
+            new_prefix_length: int,
     ) -> None:
         old_segments = {seg.name: seg for seg in old_template.field_segments}
         for new_seg in new_template.field_segments:
@@ -256,9 +256,9 @@ class TemplateExpansionOperations:
             copy_len = min(old_seg.length, new_seg.length)
             for idx in range(copy_len):
                 old_pos = (
-                    old_prompt_length
-                    + old_prefix_length
-                    + old_seg.value_positions[idx]
+                        old_prompt_length
+                        + old_prefix_length
+                        + old_seg.value_positions[idx]
                 )
                 new_pos = new_prompt_length + new_prefix_length + new_seg.value_positions[idx]
                 new_sequence[0, new_pos] = old_sequence[0, old_pos]

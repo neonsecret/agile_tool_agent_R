@@ -55,10 +55,10 @@ class TestEncodeToolCallWrapper:
 
     def test_wrapper_structure(self, tokenizer):
         parts = encode_tool_call_wrapper(tokenizer, "get_weather")
-        
+
         prefix_str = tokenizer.decode(parts.prefix_ids, skip_special_tokens=False)
         suffix_str = tokenizer.decode(parts.suffix_ids, skip_special_tokens=False)
-        
+
         assert "<tool_call>" in prefix_str
         assert '"name": "get_weather"' in prefix_str
         assert '"arguments":' in prefix_str
@@ -68,10 +68,10 @@ class TestEncodeToolCallWrapper:
     def test_wrapper_different_tool_names(self, tokenizer):
         parts1 = encode_tool_call_wrapper(tokenizer, "search")
         parts2 = encode_tool_call_wrapper(tokenizer, "calculate")
-        
+
         prefix1 = tokenizer.decode(parts1.prefix_ids, skip_special_tokens=False)
         prefix2 = tokenizer.decode(parts2.prefix_ids, skip_special_tokens=False)
-        
+
         assert '"name": "search"' in prefix1
         assert '"name": "calculate"' in prefix2
 
@@ -89,7 +89,7 @@ class TestApplySmolLM3ChatTemplate:
             {"role": "user", "content": "Hello"},
         ]
         ids = apply_smollm3_chat_template(tokenizer, messages, add_generation_prompt=True)
-        
+
         assert isinstance(ids, list)
         assert all(isinstance(i, int) for i in ids)
         assert len(ids) > 0
@@ -101,7 +101,7 @@ class TestApplySmolLM3ChatTemplate:
         ]
         ids = apply_smollm3_chat_template(tokenizer, messages, add_generation_prompt=True)
         text = tokenizer.decode(ids, skip_special_tokens=False)
-        
+
         assert "system" in text.lower() or "<|im_start|>" in text
         assert "2+2" in text
 
@@ -122,10 +122,10 @@ class TestApplySmolLM3ChatTemplate:
                 }
             }
         ]
-        
+
         ids = apply_smollm3_chat_template(tokenizer, messages, tools=tools, add_generation_prompt=True)
         text = tokenizer.decode(ids, skip_special_tokens=False)
-        
+
         # Should contain tool schema
         assert "get_weather" in text
         assert "location" in text
@@ -134,7 +134,7 @@ class TestApplySmolLM3ChatTemplate:
         messages = [{"role": "user", "content": "Hi"}]
         ids_with = apply_smollm3_chat_template(tokenizer, messages, add_generation_prompt=True)
         ids_without = apply_smollm3_chat_template(tokenizer, messages, add_generation_prompt=False)
-        
+
         # With generation prompt should be longer
         assert len(ids_with) >= len(ids_without)
 
@@ -147,17 +147,17 @@ class TestEndToEndToolCallFormat:
             {"role": "system", "content": "/no_think"},
             {"role": "user", "content": "Get weather in Paris"},
         ]
-        
+
         prompt_ids = apply_smollm3_chat_template(tokenizer, messages, add_generation_prompt=True)
         parts = encode_tool_call_wrapper(tokenizer, "get_weather")
-        
+
         # Simulate argument scaffold (just the structure)
         args_json = '{"location": "Paris"}'
         args_ids = tokenizer.encode(args_json, add_special_tokens=False)
-        
+
         full_ids = prompt_ids + parts.prefix_ids + args_ids + parts.suffix_ids
         full_text = tokenizer.decode(full_ids, skip_special_tokens=False)
-        
+
         # Parse the tool call back
         parsed = parse_first_tool_call(full_text)
         assert parsed is not None

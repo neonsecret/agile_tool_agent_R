@@ -169,7 +169,7 @@ def evaluate(model, eval_dataloader, accelerator, null_token_id=None, return_log
                 losses_detail = outputs.get("losses", {})
                 if "diffusion" in losses_detail:
                     total_diffusion_loss += losses_detail["diffusion"].detach()
-            
+
             if "logits" in outputs:
                 logits = outputs["logits"]
                 predictions = torch.argmax(logits, dim=-1)
@@ -205,14 +205,14 @@ def evaluate(model, eval_dataloader, accelerator, null_token_id=None, return_log
         "eval/total_loss": total_loss.item() / max(num_batches.item(), 1.0),
         "eval/diffusion_loss": total_diffusion_loss.item() / max(num_batches.item(), 1.0),
     }
-    
+
     if null_counts is not None and null_token_id is not None:
         for key, value in null_counts.items():
             null_counts[key] = _sum_across_processes(value, accelerator)
         null_metrics = _null_metrics_from_counts(null_counts)
         for key, value in null_metrics.items():
             metrics[f"eval/{key}"] = value
-    
+
     scaffold_metrics = _scaffold_metrics_from_stats(scaffold_stats, accelerator)
     for key, value in scaffold_metrics.items():
         metrics[f"eval/{key}"] = value

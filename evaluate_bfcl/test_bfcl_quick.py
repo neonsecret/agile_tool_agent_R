@@ -53,7 +53,7 @@ def main():
 
     print(f"Sample dataset contains {len(sample_data)} examples:")
     for i, example in enumerate(sample_data):
-        print(f"  {i+1}. {example['question'][:60]}...")
+        print(f"  {i + 1}. {example['question'][:60]}...")
     print()
 
     # Run evaluation

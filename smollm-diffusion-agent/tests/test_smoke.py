@@ -37,7 +37,7 @@ class TestDataPipeline:
 
     def test_dataset_creates_valid_examples(self, tokenizer, mask_and_null):
         mask_str, mask_id, null_str, null_id = mask_and_null
-        
+
         dataset = SmartScaffoldDataset(
             tokenizer=tokenizer,
             split="train",
@@ -46,19 +46,19 @@ class TestDataPipeline:
             mask_token=mask_str,
             null_token=null_str,
         )
-        
+
         # Get first tool example (all examples are tool examples now)
         tool_example = dataset[0]
-        
+
         # Verify structure
         assert tool_example["input_ids"].shape[0] <= 1024
         assert tool_example["scaffold_mask"].any()
-        
+
         # Verify mask tokens are in the right places
         masked_positions = tool_example["scaffold_mask"].nonzero(as_tuple=True)[0]
         for pos in masked_positions:
             assert tool_example["input_ids"][pos].item() == mask_id
-        
+
         # Verify labels are correct
         for pos in masked_positions:
             label = tool_example["labels"][pos].item()
@@ -69,7 +69,7 @@ class TestDataPipeline:
 
     def test_tool_call_format_in_dataset(self, tokenizer, mask_and_null):
         mask_str, mask_id, null_str, null_id = mask_and_null
-        
+
         dataset = SmartScaffoldDataset(
             tokenizer=tokenizer,
             split="train",
@@ -78,11 +78,11 @@ class TestDataPipeline:
             mask_token=mask_str,
             null_token=null_str,
         )
-        
+
         # All examples are tool examples now
         item = dataset[0]
         text = tokenizer.decode(item["input_ids"], skip_special_tokens=False)
-        
+
         # Should contain SmolLM3's tool call format
         assert "<tool_call>" in text
         assert "</tool_call>" in text
@@ -107,10 +107,10 @@ class TestSmolLM3Compatibility:
                 }
             }
         ]
-        
+
         ids = apply_smollm3_chat_template(tokenizer, messages, tools=tools)
         text = tokenizer.decode(ids, skip_special_tokens=False)
-        
+
         # Verify tool appears in prompt
         assert "get_weather" in text
         assert "location" in text
@@ -118,14 +118,14 @@ class TestSmolLM3Compatibility:
     def test_tool_call_wrapper_parseable(self, tokenizer):
         tool_name = "get_weather"
         parts = encode_tool_call_wrapper(tokenizer, tool_name)
-        
+
         # Simulate filled arguments
         args_text = '{"location": "London"}'
         args_ids = tokenizer.encode(args_text, add_special_tokens=False)
-        
+
         full_ids = parts.prefix_ids + args_ids + parts.suffix_ids
         full_text = tokenizer.decode(full_ids, skip_special_tokens=False)
-        
+
         # Should parse correctly
         parsed = parse_first_tool_call(full_text)
         assert parsed is not None
@@ -138,9 +138,9 @@ class TestModelComponents:
 
     def test_diffusion_head(self, tokenizer, mask_and_null):
         from model.diffusion_head import SchemaDiffusionHead
-        
+
         mask_str, mask_id, null_str, null_id = mask_and_null
-        
+
         device = torch.device("cpu")
         head = SchemaDiffusionHead(
             input_dim=3072,
@@ -150,13 +150,13 @@ class TestModelComponents:
             num_steps=2,
         ).to(device)
         head.set_mask_token_id(mask_id)
-        
+
         hidden_states = torch.randn(2, 32, 3072)
         current_tokens = torch.randint(0, len(tokenizer), (2, 32))
         t = torch.rand(2)
-        
+
         logits = head.predict(hidden_states, current_tokens, t)
-        
+
         assert logits.shape == (2, 32, len(tokenizer))
         assert not torch.isnan(logits).any()
 
@@ -166,9 +166,9 @@ class TestSchemaScaffolding:
 
     def test_schema_template_has_correct_masks(self, tokenizer, mask_and_null):
         mask_str, mask_id, null_str, null_id = mask_and_null
-        
+
         fields = [("city", 20), ("units", 10)]
-        
+
         template = build_schema_template(
             tokenizer=tokenizer,
             fields=fields,
@@ -176,11 +176,11 @@ class TestSchemaScaffolding:
             null_token=null_str,
             include_codeblock=False,
         )
-        
+
         # Should have 30 mask tokens (20 + 10)
         mask_count = sum(1 for t in template.tokens if t == mask_id)
         assert mask_count == 30
-        
+
         # Should have 2 field segments
         assert len(template.field_segments) == 2
         assert template.field_segments[0].name == "city"
@@ -188,7 +188,7 @@ class TestSchemaScaffolding:
 
     def test_schema_template_text_structure(self, tokenizer, mask_and_null):
         mask_str, mask_id, null_str, null_id = mask_and_null
-        
+
         fields = [("location", 16)]
         template = build_schema_template(
             tokenizer=tokenizer,
@@ -197,7 +197,7 @@ class TestSchemaScaffolding:
             null_token=null_str,
             include_codeblock=False,
         )
-        
+
         # Should be valid JSON structure
         assert "{" in template.text
         assert "}" in template.text
@@ -209,29 +209,29 @@ class TestEndToEndFormat:
 
     def test_complete_format(self, tokenizer, mask_and_null):
         mask_str, mask_id, null_str, null_id = mask_and_null
-        
+
         # 1. Create prompt with tools
         messages = [
             {"role": "system", "content": "/no_think"},
             {"role": "user", "content": "Weather in Paris?"},
         ]
         tools = [{"name": "get_weather", "parameters": {"properties": {"location": {"type": "string"}}}}]
-        
+
         prompt_ids = apply_smollm3_chat_template(tokenizer, messages, tools=tools)
-        
+
         # 2. Create tool call wrapper
         parts = encode_tool_call_wrapper(tokenizer, "get_weather")
-        
+
         # 3. Create scaffold
         fields = [("location", 16)]
         template = build_schema_template(tokenizer, fields, mask_str, null_str, include_codeblock=False)
-        
+
         # 4. Combine
         full_ids = list(prompt_ids) + list(parts.prefix_ids) + list(template.tokens) + list(parts.suffix_ids)
-        
+
         # Verify it's under max_seq_len
         assert len(full_ids) <= 1024
-        
+
         # Decode and verify structure
         text = tokenizer.decode(full_ids, skip_special_tokens=False)
         assert "<tool_call>" in text

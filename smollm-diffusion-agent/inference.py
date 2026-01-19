@@ -118,11 +118,11 @@ class FunctionCallGenerator:
 
         is_cuda = device.type == "cuda"
         is_mps = device.type == "mps"
-        
+
         if use_torch_compile and not is_cuda and not is_mps:
             print(f"Warning: torch.compile on {device.type} may not be optimized, disabling")
             use_torch_compile = False
-        
+
         if use_cuda_graph and not is_cuda:
             use_cuda_graph = False
 
@@ -146,7 +146,7 @@ class FunctionCallGenerator:
 
         self._system_message_tool = "/no_think"
         self._system_message_chat = "/think"
-        
+
         self.generation_ops = GenerationOperations(
             model, tokenizer, device,
             self._system_message_tool, self._system_message_chat
@@ -192,12 +192,12 @@ class FunctionCallGenerator:
 
     def generate_chat(self, prompt: str, max_new_tokens: int = 256) -> str:
         return self.generation_ops.generate_chat(prompt, max_new_tokens)
-    
+
     def generate_think(self, prompt: str, max_new_tokens: int = 512) -> str:
         return self.generation_ops.generate_think(prompt, max_new_tokens)
-    
+
     def select_tool_call(
-        self, prompt: str, tool_registry: Dict[str, Any]
+            self, prompt: str, tool_registry: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         return self.generation_ops.select_tool_call(prompt, tool_registry)
 
@@ -221,18 +221,18 @@ class FunctionCallGenerator:
             state.sequence, state.prompt_length, state.prefix_length,
             state.template, state.template.null_token_id
         )
-    
+
     def _expand_template(self, template: SchemaTemplate, fields_to_expand: List[str]) -> Optional[SchemaTemplate]:
         """Wrapper for backward compatibility with tests."""
         return self.expansion_ops._expand_template(template, fields_to_expand)
-    
+
     def _apply_warm_start(
-        self,
-        warm_state: GenerationState,
-        new_sequence: torch.Tensor,
-        new_template: SchemaTemplate,
-        new_prompt_length: int,
-        new_prefix_length: int,
+            self,
+            warm_state: GenerationState,
+            new_sequence: torch.Tensor,
+            new_template: SchemaTemplate,
+            new_prompt_length: int,
+            new_prefix_length: int,
     ) -> None:
         """Wrapper for backward compatibility with tests."""
         self.expansion_ops._apply_warm_start(
@@ -258,7 +258,7 @@ class FunctionCallGenerator:
         3. If no tools: Use AR generation
         """
         cfg = config or GenerationConfig()
-        
+
         if tool_registry is None or len(tool_registry) == 0:
             response = self.generate_chat(prompt)
             return {"mode": "chat", "response": response, "note": "No tools provided"}
@@ -276,9 +276,9 @@ class FunctionCallGenerator:
                 "response": response,
                 "note": f"Tool selection failed or unknown tool: {tool_name}",
             }
-        
+
         tool_schema = tool_registry[tool_name]
-        
+
         min_budget = self.budget_config.get("min_tokens", MIN_FIELD_BUDGET)
         max_budget = self.budget_config.get("max_tokens", 48)
         extra_budget = self.budget_config.get("extra_tokens", 0)
@@ -289,7 +289,7 @@ class FunctionCallGenerator:
             max_budget=max_budget,
             extra_budget=extra_budget,
         )
-        
+
         mask_token_str = self.tokenizer.convert_ids_to_tokens(
             [self.model.diffusion_head.mask_token_id]
         )[0]
@@ -299,7 +299,7 @@ class FunctionCallGenerator:
             if null_token_id is not None
             else None
         )
-        
+
         template = build_schema_template(
             tokenizer=self.tokenizer,
             fields=fields,
@@ -307,7 +307,7 @@ class FunctionCallGenerator:
             null_token=null_token_str,
             include_codeblock=False,
         )
-        
+
         output = self.generate(
             prompt=prompt,
             template=template,
@@ -315,7 +315,7 @@ class FunctionCallGenerator:
             tool_name=tool_name,
             tools=list(tool_registry.values()),
         )
-        
+
         parsed = parse_first_tool_call(output.text)
         return {
             "mode": "tool",
@@ -524,7 +524,8 @@ class FunctionCallGenerator:
 
                 if cfg.show_steps:
                     revealed_token_ids = predictions[0, selected].cpu().tolist()
-                    revealed_tokens = [self.tokenizer.decode([tid], skip_special_tokens=False) for tid in revealed_token_ids[:5]]
+                    revealed_tokens = [self.tokenizer.decode([tid], skip_special_tokens=False) for tid in
+                                       revealed_token_ids[:5]]
                     print(f"  Revealing {len(selected)} tokens: {revealed_token_ids[:5]}")
                     print(f"  Decoded: {revealed_tokens}")
 

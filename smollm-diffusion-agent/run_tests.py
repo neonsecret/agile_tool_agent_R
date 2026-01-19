@@ -18,19 +18,19 @@ def main():
     parser.add_argument("--slow", action="store_true", help="Run only slow tests")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     args = parser.parse_args()
-    
+
     cmd = ["python", "-m", "pytest"]
-    
+
     if args.slow:
         cmd.extend(["-m", "slow"])
     elif not args.all:
         cmd.extend(["-m", "not slow"])
-    
+
     if args.verbose:
         cmd.append("-vv")
-    
+
     cmd.append("tests/")
-    
+
     print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=".")
     sys.exit(result.returncode)

@@ -28,7 +28,7 @@ class BidirectionalAttentionBlockOptimized(nn.Module):
     - torch.compile friendly
     - Memory efficient (O(n) instead of O(n²) for materialized attention weights)
     """
-    
+
     def __init__(self, hidden_dim, num_heads=8, dropout=0.1, use_fused_qkv=True):
         """
         Args:
@@ -39,33 +39,33 @@ class BidirectionalAttentionBlockOptimized(nn.Module):
         """
         super().__init__()
         assert hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads"
-        
+
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
         self.dropout_p = dropout
         self.use_fused_qkv = use_fused_qkv
-        
+
         if use_fused_qkv:
             self.qkv_proj = nn.Linear(hidden_dim, hidden_dim * 3, bias=True)
         else:
             self.q_proj = nn.Linear(hidden_dim, hidden_dim)
             self.k_proj = nn.Linear(hidden_dim, hidden_dim)
             self.v_proj = nn.Linear(hidden_dim, hidden_dim)
-        
+
         self.out_proj = nn.Linear(hidden_dim, hidden_dim)
-        
+
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.norm2 = nn.LayerNorm(hidden_dim)
-        
+
         self.mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 4),
             nn.GELU(),
             nn.Linear(hidden_dim * 4, hidden_dim),
         )
-        
+
         self.dropout = nn.Dropout(dropout)
-    
+
     def forward(self, x, attention_mask=None):
         """
         Args:
@@ -76,9 +76,9 @@ class BidirectionalAttentionBlockOptimized(nn.Module):
             [batch, seq_len, hidden_dim]
         """
         batch_size, seq_len, _ = x.shape
-        
+
         normed = self.norm1(x)
-        
+
         if self.use_fused_qkv:
             qkv = self.qkv_proj(normed)
             qkv = qkv.view(batch_size, seq_len, 3, self.num_heads, self.head_dim)
@@ -88,27 +88,27 @@ class BidirectionalAttentionBlockOptimized(nn.Module):
             q = self.q_proj(normed).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
             k = self.k_proj(normed).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
             v = self.v_proj(normed).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        
+
         dropout_p = self.dropout_p if self.training else 0.0
-        
+
         attn_mask_sdpa = None
         if attention_mask is not None:
             attn_mask_sdpa = attention_mask.view(batch_size, 1, 1, seq_len)
             attn_mask_sdpa = attn_mask_sdpa.expand(batch_size, self.num_heads, seq_len, seq_len)
-        
+
         attn_output = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask_sdpa,
             dropout_p=dropout_p,
             is_causal=False,
         )
-        
+
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(batch_size, seq_len, self.hidden_dim)
         attn_output = self.out_proj(attn_output)
-        
+
         x = x + self.dropout(attn_output)
-        
+
         x = x + self.dropout(self.mlp(self.norm2(x)))
-        
+
         return x

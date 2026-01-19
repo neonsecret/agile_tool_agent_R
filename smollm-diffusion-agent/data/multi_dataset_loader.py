@@ -11,6 +11,7 @@ from .dataset_formats import get_adapter
 
 class MultiDatasetConfig:
     """Configuration for a single dataset source."""
+
     def __init__(self, name: str, split: str = "train", weight: float = 1.0, limit: Optional[int] = None):
         self.name = name
         self.split = split
@@ -29,23 +30,23 @@ def load_and_unify_dataset(config: MultiDatasetConfig) -> List[Dict[str, Any]]:
         List of unified examples
     """
     print(f"Loading {config.name} (split={config.split})...")
-    
+
     # Load dataset
     ds = load_dataset(config.name, split=config.split)
-    
+
     # Apply limit if specified
     if config.limit:
         ds = ds.select(range(min(config.limit, len(ds))))
-    
+
     print(f"  Loaded {len(ds)} examples")
-    
+
     # Get adapter
     adapter = get_adapter(config.name)
-    
+
     # Convert to unified format
     unified_examples = []
     failed = 0
-    
+
     for ex in ds:
         try:
             unified = adapter.convert(ex)
@@ -54,19 +55,19 @@ def load_and_unify_dataset(config: MultiDatasetConfig) -> List[Dict[str, Any]]:
             failed += 1
             if failed <= 5:  # Only print first 5 failures
                 print(f"  Warning: Failed to convert example: {e}")
-    
+
     if failed > 0:
         print(f"  Failed to convert {failed}/{len(ds)} examples")
-    
+
     print(f"  Successfully converted {len(unified_examples)} examples")
-    
+
     return unified_examples
 
 
 def create_multi_dataset(
-    dataset_configs: List[MultiDatasetConfig],
-    shuffle: bool = True,
-    seed: int = 42
+        dataset_configs: List[MultiDatasetConfig],
+        shuffle: bool = True,
+        seed: int = 42
 ) -> List[Dict[str, Any]]:
     """
     Create a combined dataset from multiple sources with weighted sampling.
@@ -80,11 +81,11 @@ def create_multi_dataset(
         Combined list of examples
     """
     all_examples = []
-    
+
     # Load each dataset
     for config in dataset_configs:
         examples = load_and_unify_dataset(config)
-        
+
         # Apply weighting by duplicating/subsampling
         if config.weight != 1.0:
             n_samples = int(len(examples) * config.weight)
@@ -97,17 +98,17 @@ def create_multi_dataset(
                 random.seed(seed)
                 examples = random.sample(examples, n_samples)
             print(f"  Applied weight {config.weight}: {len(examples)} examples")
-        
+
         all_examples.extend(examples)
-    
+
     print(f"\nTotal examples: {len(all_examples)}")
-    
+
     # Shuffle if requested
     if shuffle:
         random.seed(seed)
         random.shuffle(all_examples)
         print(f"Shuffled combined dataset")
-    
+
     return all_examples
 
 
@@ -131,7 +132,7 @@ def load_multi_dataset_from_config(config: Dict[str, Any]) -> List[Dict[str, Any
           dataset_name: "..."
     """
     data_cfg = config.get("data", {})
-    
+
     global_limit = data_cfg.get("limit")
 
     # Check if multi-dataset config exists
@@ -153,7 +154,7 @@ def load_multi_dataset_from_config(config: Dict[str, Any]) -> List[Dict[str, Any
         if global_limit is not None:
             return examples[:global_limit]
         return examples
-    
+
     # Fallback: single dataset (backwards compatible)
     elif "dataset_name" in data_cfg:
         dataset_name = data_cfg["dataset_name"]
@@ -165,6 +166,6 @@ def load_multi_dataset_from_config(config: Dict[str, Any]) -> List[Dict[str, Any
             limit=limit,
         )
         return load_and_unify_dataset(config_obj)
-    
+
     else:
         raise ValueError("Config must specify either 'data.datasets' (list) or 'data.dataset_name' (string)")

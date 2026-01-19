@@ -18,7 +18,6 @@ from .dataset_processing import (
     extract_tool_call_from_message,
 )
 
-
 # Budget configuration - matches guide.md recommendations
 # Minimum budget ensures consistency across fields (prevents too-small templates)
 # Maximum budget prevents excessive memory usage
@@ -28,19 +27,19 @@ DEFAULT_MAX_BUDGET = 48
 
 class SmartScaffoldDataset(Dataset):
     def __init__(
-        self,
-        tokenizer,
-        split: str = "train",
-        max_seq_len: int = 1024,
-        max_new_tokens: int = 256,
-        limit: Optional[int] = None,
-        mask_token: Optional[str] = None,
-        null_token: Optional[str] = None,
-        chat_sampling_rate: float = 0.1,
-        mask_budget: int = 48,
-        system_message: str = "/no_think",
-        max_history_messages: int = 12,
-        data_config: Optional[Dict[str, Any]] = None,
+            self,
+            tokenizer,
+            split: str = "train",
+            max_seq_len: int = 1024,
+            max_new_tokens: int = 256,
+            limit: Optional[int] = None,
+            mask_token: Optional[str] = None,
+            null_token: Optional[str] = None,
+            chat_sampling_rate: float = 0.1,
+            mask_budget: int = 48,
+            system_message: str = "/no_think",
+            max_history_messages: int = 12,
+            data_config: Optional[Dict[str, Any]] = None,
     ):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
@@ -60,7 +59,7 @@ class SmartScaffoldDataset(Dataset):
             )
 
         self.mask_token, self.mask_token_id = resolve_mask_token(tokenizer, mask_token)
-        
+
         # NULL token for self-adaptive masking (variable-length fields)
         self.null_token = None
         self.null_token_id = None
@@ -216,15 +215,15 @@ class SmartScaffoldDataset(Dataset):
         # If no template (Chat example), return minimal dict (no diffusion training)
         if ex["template"] is None:
             input_ids = torch.tensor(prompt_ids, dtype=torch.long)
-            
+
             # Truncate if too long
             if len(input_ids) > self.max_seq_len:
                 input_ids = input_ids[-self.max_seq_len:]
-            
+
             attention_mask = torch.ones_like(input_ids)
             scaffold_mask = torch.zeros_like(input_ids, dtype=torch.bool)
             labels = torch.full_like(input_ids, -100)
-            
+
             return {
                 "input_ids": input_ids,
                 "attention_mask": attention_mask,
