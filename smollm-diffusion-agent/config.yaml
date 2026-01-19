@@ -35,7 +35,7 @@ diffusion:
 
 # Training Configuration
 training:
-  batch_size: 16  # Increased from 8 with FlashAttention + gradient checkpointing (can try 20-24 if enough VRAM)
+  batch_size: 12  # Increased from 8 with FlashAttention + gradient checkpointing (can try 20-24 if enough VRAM)
   learning_rate: 1.0e-4
   num_epochs: 8
   gradient_accumulation_steps: 4

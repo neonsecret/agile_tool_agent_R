@@ -10,15 +10,15 @@ wandb
 hf_transfer
 
 # CUDA-specific dependencies (install separately on Linux/Windows with NVIDIA GPU)
-# pip install bitsandbytes>=0.41.0  # 4-bit quantization
-# pip install flash-attn>=2.0.0  # FlashAttention-2 (2-3x speedup + 40-60% memory reduction)
-# pip install triton>=2.0.0  # CUDA kernel compilation (required by flash-attn)
-# pip install unsloth  # Faster training/inference
-# pip install xformers  # Memory-efficient attention (alternative to flash-attn)
-# pip install deepspeed  # Distributed training
+bitsandbytes>=0.41.0  # 4-bit quantization
+flash-attn>=2.0.0  # FlashAttention-2 (2-3x speedup + 40-60% memory reduction)
+triton>=2.0.0  # CUDA kernel compilation (required by flash-attn)
+unsloth  # Faster training/inference
+xformers  # Memory-efficient attention (alternative to flash-attn)
+deepspeed  # Distributed training
 
 # Optional (cross-platform)
-# pip install optimum  # BetterTransformer (may conflict with quantization)
+optimum  # BetterTransformer (may conflict with quantization)
 
 # Note: For Mac (MPS), use standard PyTorch with bfloat16
 # Note: For MLX on Apple Silicon, see separate train_mlx.py
