@@ -72,6 +72,15 @@ def validate_and_adjust_config(config: Dict[str, Any], device: torch.device) -> 
         if use_unsloth or use_unsloth is None:
             print(f"  ✓ Unsloth optimization available")
         
+        if model_cfg.get("use_flash_attention", True):
+            print(f"  ✓ FlashAttention-2 enabled for base model")
+        
+        if model_cfg.get("use_gradient_checkpointing", False):
+            print(f"  ✓ Gradient checkpointing enabled (memory efficient)")
+        
+        if model_cfg.get("use_better_transformer", False):
+            print(f"  ✓ BetterTransformer enabled")
+        
         if infer_cfg.get("use_cuda_graph", False):
             print(f"  ✓ CUDA graphs enabled for inference")
         
@@ -122,6 +131,11 @@ def get_model_kwargs(config: Dict[str, Any], device: torch.device) -> Dict[str, 
         "max_seq_length": train_cfg.get("max_seq_len", 2048),
         "enable_unsloth_inference_opt": model_cfg.get("enable_unsloth_inference_opt", True),
         "device": device,
+        "use_flash_attention": model_cfg.get("use_flash_attention", True) and is_cuda,
+        "use_gradient_checkpointing": model_cfg.get("use_gradient_checkpointing", False),
+        "use_better_transformer": model_cfg.get("use_better_transformer", False) and is_cuda and not load_in_4bit,
+        "unsloth_use_gradient_checkpointing": model_cfg.get("unsloth_use_gradient_checkpointing", "unsloth"),
+        "unsloth_rope_scaling": model_cfg.get("unsloth_rope_scaling", None),
     }
     
     return kwargs
@@ -165,6 +179,15 @@ def print_device_capabilities():
         print(f"  - Current device: {torch.cuda.current_device()}")
         print(f"  - Device name: {torch.cuda.get_device_name(0)}")
         print(f"  - CUDA version: {torch.version.cuda}")
+        
+        capability = torch.cuda.get_device_capability(0)
+        print(f"  - Compute capability: {capability[0]}.{capability[1]}")
+        if capability[0] >= 8:
+            print(f"    (Ampere+ GPU: FlashAttention-2 fully supported)")
+        elif capability[0] >= 7:
+            print(f"    (Volta/Turing GPU: FlashAttention supported with limitations)")
+        else:
+            print(f"    (Older GPU: FlashAttention may not be available)")
     else:
         print(f"✗ CUDA not available")
     
@@ -185,5 +208,17 @@ def print_device_capabilities():
         print(f"✓ unsloth available")
     except ImportError:
         print(f"✗ unsloth not available")
+    
+    try:
+        import flash_attn
+        print(f"✓ flash-attn available (version {flash_attn.__version__})")
+    except ImportError:
+        print(f"✗ flash-attn not available (FlashAttention disabled)")
+    
+    try:
+        from optimum.bettertransformer import BetterTransformer
+        print(f"✓ optimum available (BetterTransformer enabled)")
+    except ImportError:
+        print(f"✗ optimum not available (BetterTransformer disabled)")
     
     print("="*60 + "\n")

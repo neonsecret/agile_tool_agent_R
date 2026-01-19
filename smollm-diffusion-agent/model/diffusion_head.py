@@ -11,15 +11,20 @@ Combines:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import logging
 
 from .noise_schedule import LogLinearNoise
 from .attention_blocks import BidirectionalAttentionBlock
+from .attention_blocks_optimized import BidirectionalAttentionBlockOptimized
+
+logger = logging.getLogger(__name__)
 
 
 class SchemaDiffusionHead(nn.Module):
     def __init__(self, input_dim, vocab_size, hidden_dim=1024, num_layers=2, num_steps=4,
                  label_smoothing=0.1, use_bidirectional=True, num_heads=8,
-                 null_loss_weight=0.3, null_prediction_penalty=0.0, entropy_weight=0.05):
+                 null_loss_weight=0.3, null_prediction_penalty=0.0, entropy_weight=0.05,
+                 use_optimized_attention=True):
         """
         Args:
             input_dim: Dimension of hidden states from base model
@@ -31,6 +36,7 @@ class SchemaDiffusionHead(nn.Module):
             use_bidirectional: If True, use bidirectional attention; else use residual MLPs
             num_heads: Number of attention heads (only used if use_bidirectional=True)
             entropy_weight: Weight for entropy regularization (prevents token collapse)
+            use_optimized_attention: If True, use SDPA-optimized attention (2-3x faster)
         """
         super().__init__()
         self.num_steps = num_steps
@@ -41,6 +47,7 @@ class SchemaDiffusionHead(nn.Module):
         self.null_loss_weight = null_loss_weight
         self.null_prediction_penalty = null_prediction_penalty
         self.entropy_weight = entropy_weight
+        self.use_optimized_attention = use_optimized_attention
 
         self.noise = LogLinearNoise()
 
@@ -50,13 +57,12 @@ class SchemaDiffusionHead(nn.Module):
         self.token_emb = nn.Embedding(vocab_size, hidden_dim)
 
         if use_bidirectional:
-            # Bidirectional attention blocks for global constraint verification
+            attention_class = BidirectionalAttentionBlockOptimized if use_optimized_attention else BidirectionalAttentionBlock
             self.denoise_blocks = nn.ModuleList([
-                BidirectionalAttentionBlock(hidden_dim, num_heads=num_heads)
+                attention_class(hidden_dim, num_heads=num_heads)
                 for _ in range(num_layers)
             ])
         else:
-            # Original residual MLP blocks (faster but no global attention)
             self.denoise_blocks = nn.ModuleList([
                 nn.Sequential(
                     nn.Linear(hidden_dim, hidden_dim),
@@ -256,7 +262,11 @@ class SchemaDiffusionHead(nn.Module):
             # At high t (early diffusion): more NULLs expected, higher weight
             # At low t (late diffusion): fewer NULLs, lower weight
             if t_mean is not None:
-                t_scalar = t_mean.item() if hasattr(t_mean, 'item') else float(t_mean)
+                try:
+                    t_scalar = t_mean.item()
+                except (AttributeError, TypeError) as e:
+                    logger.debug(f"Could not call .item() on t_mean, using float(): {e}")
+                    t_scalar = float(t_mean)
                 dynamic_null_weight = self.null_loss_weight * (0.3 + 0.7 * t_scalar)
             else:
                 dynamic_null_weight = self.null_loss_weight

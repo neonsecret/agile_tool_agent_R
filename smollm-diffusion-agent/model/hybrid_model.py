@@ -1,12 +1,17 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
 try:
     import unsloth
     from unsloth import FastLanguageModel
 
     UNSLOTH_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     UNSLOTH_AVAILABLE = False
     unsloth = None
     FastLanguageModel = None
+    logger.debug(f"unsloth not available: {e}")
 
 import torch
 import torch.nn as nn
@@ -24,7 +29,11 @@ class HybridSmolLM(nn.Module):
     def __init__(self, base_model_id="HuggingFaceTB/SmolLM3-3B", load_in_4bit=False,
                  diffusion_config=None, vocab_size=None, use_unsloth=None, 
                  max_seq_length=2048, enable_unsloth_inference_opt=True,
-                 device: torch.device | None = None):
+                 device: torch.device | None = None,
+                 use_flash_attention=True, use_gradient_checkpointing=False,
+                 use_better_transformer=False,
+                 unsloth_use_gradient_checkpointing="unsloth",
+                 unsloth_rope_scaling=None):
         super().__init__()
 
         if diffusion_config is None:
@@ -33,6 +42,11 @@ class HybridSmolLM(nn.Module):
         device = device or get_device()
         self.base_llm = None
         self.use_unsloth = False
+        self.use_flash_attention = use_flash_attention
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.use_better_transformer = use_better_transformer
+        self.unsloth_use_gradient_checkpointing = unsloth_use_gradient_checkpointing
+        self.unsloth_rope_scaling = unsloth_rope_scaling
 
         self._init_torch_model(base_model_id, load_in_4bit, device, use_unsloth, max_seq_length,
                                enable_unsloth_inference_opt)
@@ -49,6 +63,7 @@ class HybridSmolLM(nn.Module):
         null_loss_weight = diffusion_config.get("null_loss_weight", 0.3)
         null_prediction_penalty = diffusion_config.get("null_prediction_penalty", 0.0)
         entropy_weight = diffusion_config.get("entropy_weight", 0.05)
+        use_optimized_attention = diffusion_config.get("use_optimized_attention", True)
 
         self.diffusion_head = SchemaDiffusionHead(
             input_dim=hidden_size,
@@ -62,6 +77,7 @@ class HybridSmolLM(nn.Module):
             null_loss_weight=null_loss_weight,
             null_prediction_penalty=null_prediction_penalty,
             entropy_weight=entropy_weight,
+            use_optimized_attention=use_optimized_attention,
         )
 
         self.diffusion_head = self.diffusion_head.to(dtype=torch.bfloat16)
@@ -81,16 +97,37 @@ class HybridSmolLM(nn.Module):
         if load_in_4bit and not cuda_available:
             print("Warning: 4-bit quantization requires CUDA, falling back to bfloat16")
             load_in_4bit = False
+        
+        if use_unsloth and self.use_flash_attention and cuda_available:
+            print("Warning: unsloth has built-in optimizations, disabling FlashAttention to avoid conflicts")
+            self.use_flash_attention = False
+        
+        if use_unsloth and self.use_gradient_checkpointing and cuda_available:
+            print("Warning: unsloth manages memory efficiently, disabling gradient checkpointing")
+            self.use_gradient_checkpointing = False
 
         if use_unsloth and UNSLOTH_AVAILABLE:
             print(f"Loading model with unsloth on CUDA (max_seq_length={max_seq_length})")
-            self.base_llm, _ = FastLanguageModel.from_pretrained(
-                model_name=base_model_id,
-                max_seq_length=max_seq_length,
-                dtype=None if load_in_4bit else torch.bfloat16,
-                load_in_4bit=load_in_4bit,
-                load_in_8bit=False,
-            )
+            
+            unsloth_kwargs = {
+                "model_name": base_model_id,
+                "max_seq_length": max_seq_length,
+                "dtype": None if load_in_4bit else torch.bfloat16,
+                "load_in_4bit": load_in_4bit,
+                "load_in_8bit": False,
+            }
+            
+            if self.unsloth_use_gradient_checkpointing is not None:
+                unsloth_kwargs["use_gradient_checkpointing"] = self.unsloth_use_gradient_checkpointing
+                if self.unsloth_use_gradient_checkpointing == "unsloth":
+                    print("  Using unsloth gradient checkpointing (offloads activations to RAM, saves VRAM)")
+            
+            if self.unsloth_rope_scaling is not None:
+                unsloth_kwargs["rope_scaling"] = self.unsloth_rope_scaling
+                print(f"  RoPE scaling: {self.unsloth_rope_scaling}")
+            
+            self.base_llm, _ = FastLanguageModel.from_pretrained(**unsloth_kwargs)
+            
             if enable_unsloth_inference_opt:
                 FastLanguageModel.for_inference(self.base_llm)
                 print("Unsloth inference optimizations enabled (2x faster)")
@@ -103,6 +140,10 @@ class HybridSmolLM(nn.Module):
             kwargs = {
                 "torch_dtype": torch.bfloat16,
             }
+            
+            if self.use_flash_attention and device.type == "cuda":
+                kwargs["attn_implementation"] = "flash_attention_2"
+                print("Enabling FlashAttention-2 for base model")
 
             if device.type == "cuda":
                 device_index = device.index if device.index is not None else 0
@@ -127,15 +168,37 @@ class HybridSmolLM(nn.Module):
 
             self.base_llm = AutoModelForCausalLM.from_pretrained(base_model_id, **kwargs)
             self.use_unsloth = False
+            
+            if self.use_gradient_checkpointing:
+                try:
+                    self.base_llm.gradient_checkpointing_enable()
+                    logger.info("Gradient checkpointing enabled for base model (saves memory)")
+                except AttributeError as e:
+                    logger.warning(f"Model does not support gradient_checkpointing_enable: {e}")
+            
+            if self.use_better_transformer and device.type == "cuda" and not load_in_4bit:
+                try:
+                    from optimum.bettertransformer import BetterTransformer
+                    self.base_llm = BetterTransformer.transform(self.base_llm)
+                    logger.info("BetterTransformer enabled for base model")
+                except ImportError as e:
+                    logger.warning(f"optimum not installed, skipping BetterTransformer (pip install optimum): {e}")
+                except Exception as e:
+                    logger.warning(f"Could not enable BetterTransformer: {e}", exc_info=True)
 
         for param in self.base_llm.parameters():
             param.requires_grad = False
 
 
-    def get_hidden_states(self, input_ids, attention_mask, output_hidden_states=True,
+    def get_hidden_states(self, input_ids, attention_mask, output_hidden_states=False,
                           use_cache=False, past_key_values=None, position_ids=None):
-        """Get hidden states from base model."""
-        return self.base_llm(
+        """Get hidden states from base model.
+        
+        Args:
+            output_hidden_states: If True, returns all layer hidden states (memory intensive).
+                                 If False, only returns last layer (recommended for training).
+        """
+        outputs = self.base_llm(
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=output_hidden_states,
@@ -143,6 +206,7 @@ class HybridSmolLM(nn.Module):
             past_key_values=past_key_values,
             position_ids=position_ids
         )
+        return outputs
 
     def forward(self, input_ids, attention_mask,
                 labels=None, scaffold_mask=None, return_logits=False):
@@ -160,8 +224,17 @@ class HybridSmolLM(nn.Module):
         """
 
         with torch.no_grad():
-            outputs = self.get_hidden_states(input_ids, attention_mask)
-            hidden_states = outputs.hidden_states[-1]
+            outputs = self.get_hidden_states(input_ids, attention_mask, output_hidden_states=False)
+            try:
+                hidden_states = outputs.last_hidden_state
+            except AttributeError as e:
+                logger.debug(f"last_hidden_state not available, trying hidden_states: {e}")
+                try:
+                    hidden_states = outputs.hidden_states[-1]
+                except (AttributeError, TypeError) as e2:
+                    logger.debug(f"hidden_states not available, requesting output_hidden_states=True: {e2}")
+                    outputs = self.get_hidden_states(input_ids, attention_mask, output_hidden_states=True)
+                    hidden_states = outputs.hidden_states[-1]
 
         device = hidden_states.device
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)

@@ -1,9 +1,15 @@
 import torch
+import os
+import logging
+
+os.environ.setdefault("UNSLOTH_COMPILE_DISABLE", "0")
+
+logger = logging.getLogger(__name__)
 
 try:
     import unsloth
-except:
-    pass
+except ImportError as e:
+    logger.debug(f"unsloth not available: {e}")
 import random
 from torch.utils.data import DataLoader, random_split
 from torch.optim import AdamW
@@ -12,20 +18,12 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from tqdm.auto import tqdm
-import os
 import wandb
 from data.device_utils import empty_cache, get_device
 from data.config_utils import validate_and_adjust_config, get_model_kwargs, print_device_capabilities
 from model.hybrid_model import HybridSmolLM
 from data.dataset_loader import SmartScaffoldDataset
 from data.utils import resolve_mask_token, resolve_null_token, validate_mask_token_consistency
-from data.metrics import (
-    calculate_null_token_metrics,
-    calculate_field_level_metrics,
-    calculate_parse_metrics,
-    calculate_scaffold_metrics,
-    extract_tool_call_json
-)
 
 from train_utils import load_config, build_collate_fn, load_checkpoint
 from train_eval import (
@@ -108,24 +106,25 @@ def train():
         model.diffusion_head.set_null_token_id(null_token_id)
 
     # Optional: torch.compile for training (compile the full model before prepare)
-    if compile_cfg.get("enabled", False) and hasattr(torch, "compile"):
+    if compile_cfg.get("enabled", False):
         compile_mode = compile_cfg.get("mode", "reduce-overhead")
         compile_fullgraph = compile_cfg.get("fullgraph", False)
 
         accelerator.print(f"torch.compile enabled for training (mode={compile_mode}, fullgraph={compile_fullgraph})")
         accelerator.print("Note: for best stability, pad/bucket sequences to fixed lengths per batch.")
         try:
-            # Disable CUDA graphs to avoid tensor reuse issues during training
-            # Note: reduce-overhead mode enables CUDA graphs by default, but we disable them here
             import torch._inductor.config as inductor_config
             inductor_config.triton.cudagraphs = False
             inductor_config.triton.cudagraph_trees = False
             accelerator.print("Inductor CUDA graphs disabled for training.")
+        except Exception as e:
+            logger.warning(f"Could not configure inductor config: {e}")
 
+        try:
             model = torch.compile(
                 model,
                 mode=compile_mode,
-                fullgraph=compile_fullgraph
+                fullgraph=compile_fullgraph,
             )
         except Exception as e:
             accelerator.print(f"torch.compile failed, falling back to eager: {e}")
@@ -236,9 +235,11 @@ def train():
         )
 
         for batch in progress_bar:
-            # Mark CUDA graph step boundary to prevent tensor reuse issues
-            if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
+            # Mark CUDA graph step boundary to prevent tensor reuse issues (torch.compile feature)
+            try:
                 torch.compiler.cudagraph_mark_step_begin()
+            except AttributeError as e:
+                logger.debug(f"cudagraph_mark_step_begin not available: {e}")
 
             with accelerator.accumulate(model):
                 outputs = model(
@@ -309,7 +310,6 @@ def train():
                 optimizer.zero_grad()
                 global_step += 1
 
-                # Log learning rate
                 if global_step % 100 == 0:
                     current_lr = scheduler.get_last_lr()[0]
                     accelerator.log({"train/learning_rate": current_lr}, step=global_step)

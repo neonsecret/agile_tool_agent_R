@@ -5,6 +5,13 @@ model:
   vocab_size: 32000  # Auto-detected from tokenizer, kept for reference
   use_unsloth: null  # null = auto-detect (CUDA only), true = force (CUDA only), false = disable
   enable_unsloth_inference_opt: true  # Enable unsloth for_inference() optimization (2x faster inference on CUDA)
+  # Unsloth-specific optimizations (only used when use_unsloth=true)
+  unsloth_use_gradient_checkpointing: "unsloth"  # "unsloth" = custom async offloading (30% VRAM save), true = standard, false = disabled
+  unsloth_rope_scaling: null  # null = auto, or dict like {"type": "linear", "factor": 2.0} for longer contexts
+  # Speed optimizations for base model (disable if using unsloth, as it has built-in optimizations)
+  use_flash_attention: true  # Use FlashAttention-2 for base model (2-3x faster, 40-60% memory reduction on CUDA). Auto-disabled if unsloth is used.
+  use_gradient_checkpointing: true  # Enable gradient checkpointing (30-50% memory reduction, ~10% slower). Auto-disabled if unsloth is used.
+  use_better_transformer: false  # Enable BetterTransformer (20-30% speedup, conflicts with quantization and unsloth)
 
 # Quantization Configuration
 # 4-bit quantization via bitsandbytes (CUDA only)
@@ -21,16 +28,17 @@ diffusion:
   num_heads: 8
   label_smoothing: 0.1  # Reduces overconfidence, improves generalization
   use_bidirectional: true  # Use bidirectional attention for global constraint verification
+  use_optimized_attention: true  # Use SDPA-optimized attention (2-3x faster, FlashAttention on CUDA)
   null_loss_weight: 0.1  # Down-weight NULL labels to avoid NULL-dominant solutions
   null_prediction_penalty: 0.3  # Penalize NULL predictions on non-NULL labels
   entropy_weight: 0.05  # Entropy regularization to prevent token collapse (λ=0.03-0.07 recommended)
 
 # Training Configuration
 training:
-  batch_size: 8
+  batch_size: 16  # Increased from 8 with FlashAttention + gradient checkpointing (can try 20-24 if enough VRAM)
   learning_rate: 1.0e-4
   num_epochs: 8
-  gradient_accumulation_steps: 3
+  gradient_accumulation_steps: 4
   max_seq_len: 2048  # Increased from 1024: median=1198, 90th percentile=2278
   max_new_tokens: 256
   seed: 42

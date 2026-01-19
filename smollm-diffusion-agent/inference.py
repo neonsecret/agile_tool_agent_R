@@ -127,14 +127,18 @@ class FunctionCallGenerator:
             use_cuda_graph = False
 
         self._compiled = False
-        if use_torch_compile and hasattr(torch, 'compile'):
-            if is_mps:
-                if _can_use_torch_compile_mps(self.device):
-                    self._compile_diffusion_head()
+        if use_torch_compile:
+            try:
+                if is_mps:
+                    if _can_use_torch_compile_mps(self.device):
+                        self._compile_diffusion_head()
+                    else:
+                        print("torch.compile on MPS requires PyTorch 2.1+, using eager mode")
                 else:
-                    print("torch.compile on MPS requires PyTorch 2.1+, using eager mode")
-            else:
-                self._compile_diffusion_head()
+                    self._compile_diffusion_head()
+            except AttributeError as e:
+                import logging
+                logging.getLogger(__name__).warning(f"torch.compile not available in this PyTorch version: {e}")
 
         self.MODE_CHAT = 0
         self.MODE_TOOL = 1

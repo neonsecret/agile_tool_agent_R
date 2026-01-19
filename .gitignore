@@ -2,3 +2,7 @@
 wandb/
 smollm-diffusion-agent/wandb/
 smollm-diffusion-agent/checkpoints
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

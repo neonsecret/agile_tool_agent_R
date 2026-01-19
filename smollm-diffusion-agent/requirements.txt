@@ -1,6 +1,6 @@
 # Core dependencies (all platforms)
 torch>=2.0.0
-transformers>=4.45.0  # 4.57.5
+transformers>=4.45.0
 accelerate>=0.20.0
 datasets>=2.12.0
 scipy
@@ -9,15 +9,16 @@ protobuf
 wandb
 hf_transfer
 
-# CUDA-specific dependencies (install only on Linux/Windows with NVIDIA GPU)
-# On Mac, skip these or they will fail
-# bitsandbytes  # 4-bit quantization (CUDA only)
-# deepspeed     # Distributed training (primarily CUDA)
-# triton        # CUDA kernel compilation
-# xformers      # Memory-efficient attention (CUDA primary)
+# CUDA-specific dependencies (install separately on Linux/Windows with NVIDIA GPU)
+# pip install bitsandbytes>=0.41.0  # 4-bit quantization
+# pip install flash-attn>=2.0.0  # FlashAttention-2 (2-3x speedup + 40-60% memory reduction)
+# pip install triton>=2.0.0  # CUDA kernel compilation (required by flash-attn)
+# pip install unsloth  # Faster training/inference
+# pip install xformers  # Memory-efficient attention (alternative to flash-attn)
+# pip install deepspeed  # Distributed training
 
-# Optional: unsloth for faster training/inference on CUDA
-# unsloth
+# Optional (cross-platform)
+# pip install optimum  # BetterTransformer (may conflict with quantization)
 
 # Note: For Mac (MPS), use standard PyTorch with bfloat16
 # Note: For MLX on Apple Silicon, see separate train_mlx.py
