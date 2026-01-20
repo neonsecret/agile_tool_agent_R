@@ -73,7 +73,12 @@ def validate_and_adjust_config(config: Dict[str, Any], device: torch.device) -> 
             print(f"  ✓ Unsloth optimization available")
 
         if model_cfg.get("use_flash_attention", True):
-            print(f"  ✓ FlashAttention-2 enabled for base model")
+            try:
+                import flash_attn  # noqa: F401
+                print(f"  ✓ FlashAttention-2 enabled for base model")
+            except Exception as e:
+                print(f"  ⚠️  FlashAttention-2 unavailable ({e}), disabling")
+                model_cfg["use_flash_attention"] = False
 
         if model_cfg.get("use_gradient_checkpointing", False):
             print(f"  ✓ Gradient checkpointing enabled (memory efficient)")

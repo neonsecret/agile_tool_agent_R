@@ -1,15 +1,13 @@
 # Model Configuration
 model:
   base_model_id: "HuggingFaceTB/SmolLM3-3B"
-  hidden_size: 2048  # Auto-detected from model, kept for reference
-  vocab_size: 32000  # Auto-detected from tokenizer, kept for reference
   use_unsloth: null  # null = auto-detect (CUDA only), true = force (CUDA only), false = disable
   enable_unsloth_inference_opt: true  # Enable unsloth for_inference() optimization (2x faster inference on CUDA)
   # Unsloth-specific optimizations (only used when use_unsloth=true)
   unsloth_use_gradient_checkpointing: "unsloth"  # "unsloth" = custom async offloading (30% VRAM save), true = standard, false = disabled
   unsloth_rope_scaling: null  # null = auto, or dict like {"type": "linear", "factor": 2.0} for longer contexts
   # Speed optimizations for base model (disable if using unsloth, as it has built-in optimizations)
-  use_flash_attention: true  # Use FlashAttention-2 for base model (2-3x faster, 40-60% memory reduction on CUDA). Auto-disabled if unsloth is used.
+  use_flash_attention: false  # Disable FlashAttention-2 (fallback to SDPA/xformers)
   use_gradient_checkpointing: true  # Enable gradient checkpointing (30-50% memory reduction, ~10% slower). Auto-disabled if unsloth is used.
   use_better_transformer: false  # Enable BetterTransformer (20-30% speedup, conflicts with quantization and unsloth)
 
@@ -75,16 +73,6 @@ training:
   eval_num_samples: 10  # Number of samples to evaluate on
   warmup_steps: 2000  # Reduced from 2500: fewer total steps with larger batch, adjust proportionally
   min_lr_ratio: 0.01  # Minimum LR as fraction of peak (0.01 = 1% of learning_rate, e.g., 1.2e-6)
-  # Distributed training configuration
-  # Note: Use `accelerate launch train.py` or `torchrun --nproc_per_node 4 train.py` to enable
-  # Setting enabled=true here is informational; actual distributed mode is detected from WORLD_SIZE env var
-  distributed:
-    enabled: true  # Set to true when using multi-GPU (informational, actual mode auto-detected)
-    # These fields are for MLX-specific distributed training (not used with PyTorch/Accelerate)
-    num_machines: 1
-    num_processes_per_machine: 1
-    backend: "ring"  # "ring" or "mpi" (MLX only)
-    main_process_port: 29500
   compile:
     enabled: false          # Enable torch.compile for training (CUDA only, auto-disabled on MPS/CPU)
     mode: "reduce-overhead" # Compilation mode: default, reduce-overhead, or max-autotune
@@ -96,7 +84,6 @@ inference:
   use_cuda_graph: true     # Enable CUDA graphs for diffusion head (CUDA only, auto-disabled on MPS/CPU)
   steps: 4                 # Number of diffusion denoising steps
   temperature: 0.0         # Sampling temperature (0.0 = greedy)
-  cfg_scale: 0.0           # Classifier-free guidance scale
   max_seq_len: 2048        # Maximum sequence length for inference
   # Running Confidence Remasking (RCR) - allows token revision during inference
   remasking:
