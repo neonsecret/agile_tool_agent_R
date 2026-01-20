@@ -8,6 +8,7 @@ sentencepiece
 protobuf
 wandb
 hf_transfer
+git+https://github.com/KellerJordan/Muon
 
 # CUDA-specific dependencies (install separately on Linux/Windows with NVIDIA GPU)
 bitsandbytes>=0.41.0  # 4-bit quantization

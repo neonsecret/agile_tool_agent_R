@@ -8,6 +8,8 @@ Combines:
 - NULL token support for self-adaptive masking (variable-length fields)
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,11 +22,22 @@ from .attention_blocks_optimized import BidirectionalAttentionBlockOptimized
 logger = logging.getLogger(__name__)
 
 
+def _create_sinusoidal_positions(max_len, dim):
+    """Create sinusoidal position embeddings."""
+    position = torch.arange(max_len).unsqueeze(1).float()
+    div_term = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(10000.0) / dim))
+    pe = torch.zeros(max_len, dim)
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    return pe
+
+
 class SchemaDiffusionHead(nn.Module):
     def __init__(self, input_dim, vocab_size, hidden_dim=1024, num_layers=2, num_steps=4,
                  label_smoothing=0.1, use_bidirectional=True, num_heads=8,
                  null_loss_weight=0.3, null_prediction_penalty=0.0, entropy_weight=0.05,
-                 use_optimized_attention=True, training_temperature=1.0):
+                 use_optimized_attention=True, training_temperature=1.0,
+                 repetition_penalty=0.0, max_seq_len=2048):
         """
         Args:
             input_dim: Dimension of hidden states from base model
@@ -38,6 +51,8 @@ class SchemaDiffusionHead(nn.Module):
             entropy_weight: Weight for entropy regularization (prevents token collapse)
             use_optimized_attention: If True, use SDPA-optimized attention (2-3x faster)
             training_temperature: Temperature for logits during training (>1.0 smooths, <1.0 sharpens)
+            repetition_penalty: Penalty for consecutive identical token predictions
+            max_seq_len: Maximum sequence length for position embeddings
         """
         super().__init__()
         self.num_steps = num_steps
@@ -50,6 +65,7 @@ class SchemaDiffusionHead(nn.Module):
         self.entropy_weight = entropy_weight
         self.use_optimized_attention = use_optimized_attention
         self.training_temperature = training_temperature
+        self.repetition_penalty = repetition_penalty
 
         self.noise = LogLinearNoise()
 
@@ -57,6 +73,12 @@ class SchemaDiffusionHead(nn.Module):
 
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         self.token_emb = nn.Embedding(vocab_size, hidden_dim)
+
+        # Sinusoidal position embeddings for length-aware predictions
+        self.register_buffer(
+            "position_embeddings",
+            _create_sinusoidal_positions(max_seq_len, hidden_dim)
+        )
 
         if use_bidirectional:
             attention_class = BidirectionalAttentionBlockOptimized if use_optimized_attention else BidirectionalAttentionBlock
@@ -137,6 +159,8 @@ class SchemaDiffusionHead(nn.Module):
         Returns:
             logits: [batch, seq_len, vocab_size] predictions
         """
+        batch_size, seq_len = hidden_states.shape[:2]
+
         context = self.input_proj(hidden_states)
         safe_tokens = current_tokens.clone()
         safe_tokens[safe_tokens < 0] = 0
@@ -144,7 +168,7 @@ class SchemaDiffusionHead(nn.Module):
 
         # Convert timestep to tensor if needed (keep as continuous float)
         if isinstance(t, (int, float)):
-            t_tensor = torch.full((hidden_states.shape[0],), t, device=hidden_states.device, dtype=torch.float)
+            t_tensor = torch.full((batch_size,), t, device=hidden_states.device, dtype=torch.float)
         else:
             t_tensor = t.float()
 
@@ -154,7 +178,10 @@ class SchemaDiffusionHead(nn.Module):
 
         t_emb = self.time_embed(t_indices).unsqueeze(1)
 
-        x = context + token_emb + t_emb
+        # Add sinusoidal position embeddings for length-aware predictions
+        pos_emb = self.position_embeddings[:seq_len].unsqueeze(0).to(hidden_states.dtype)
+
+        x = context + token_emb + t_emb + pos_emb
 
         if self.use_bidirectional:
             # Bidirectional attention blocks
@@ -314,6 +341,14 @@ class SchemaDiffusionHead(nn.Module):
         if self.entropy_weight > 0 and active_logits.numel() > 0:
             entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1).mean()
             loss = loss - self.entropy_weight * entropy
+
+        # Repetition penalty: penalize consecutive identical predictions
+        if self.repetition_penalty > 0 and active_logits.numel() > 1:
+            predictions = active_logits.argmax(dim=-1)
+            consecutive_same = (predictions[1:] == predictions[:-1]).float()
+            if consecutive_same.numel() > 0:
+                rep_penalty = consecutive_same.mean() * self.repetition_penalty
+                loss = loss + rep_penalty
 
         return loss
 

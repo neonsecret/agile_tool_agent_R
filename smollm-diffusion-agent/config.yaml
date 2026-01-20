@@ -31,14 +31,37 @@ diffusion:
   use_optimized_attention: true  # Use SDPA-optimized attention (2-3x faster, FlashAttention on CUDA)
   null_loss_weight: 0.1  # Down-weight NULL labels to avoid NULL-dominant solutions
   null_prediction_penalty: 0.3  # Penalize NULL predictions on non-NULL labels
-  entropy_weight: 0.07  # Entropy regularization to prevent token collapse (increased from 0.05 due to severe collapse)
-  training_temperature: 1.5  # Temperature scaling during training (>1.0 smooths predictions, encourages exploration)
+  entropy_weight: 0.025  # Reduced from 0.07: high entropy causes random garbage, lower value stabilizes
+  training_temperature: 1.2  # Reduced from 1.5: less smoothing to reduce low-confidence token spam
+  repetition_penalty: 0.3  # Penalize consecutive identical token predictions (prevents "ativityativityativity")
 
 # Training Configuration
+# Optimized for 4x RTX 4090 (24GB each) with 4-bit quantization
+# Effective batch size = batch_size * num_gpus * gradient_accumulation_steps = 24 * 4 * 4 = 384
 training:
-  batch_size: 12  # Increased from 8 with FlashAttention + gradient checkpointing (can try 20-24 if enough VRAM)
-  learning_rate: 1.0e-4
-  num_epochs: 8
+  batch_size: 24  # 6 per GPU on 4x RTX 4090 (24GB each). Safe with 4-bit quantization + FlashAttention
+  learning_rate: 1.2e-4  # Slightly increased for larger effective batch (384 vs previous 32-48)
+  optimizer:
+    name: "muon"
+    muon:
+      lr: 1.2e-4
+      momentum: 0.95
+      weight_decay: 0.01
+    adamw:
+      lr: 1.2e-4
+      betas: [0.9, 0.95]
+      eps: 1.0e-08
+      weight_decay: 0.01
+  scheduler:
+    name: "one_cycle"
+    max_lr: 1.2e-4
+    pct_start: 0.1
+    anneal_strategy: "cos"
+    div_factor: 25.0
+    final_div_factor: 10000.0
+    cycle_momentum: false
+    three_phase: false
+  num_epochs: 6  # Reduced from 8: larger effective batch (384) converges faster, 6 epochs sufficient
   gradient_accumulation_steps: 4
   max_seq_len: 2048  # median=556, 90th percentile=1270, 95th percentile=1742
   max_new_tokens: 256
@@ -50,13 +73,17 @@ training:
   checkpoint_path: "checkpoints/best_model/model.pt"
   eval_every_n_steps: 1000  # Run functional evaluation every N steps
   eval_num_samples: 10  # Number of samples to evaluate on
-  warmup_steps: 2500  # LR warmup steps (from guide.md), capped at 10% of total steps
-  # Distributed training (MLX only)
+  warmup_steps: 2000  # Reduced from 2500: fewer total steps with larger batch, adjust proportionally
+  min_lr_ratio: 0.01  # Minimum LR as fraction of peak (0.01 = 1% of learning_rate, e.g., 1.2e-6)
+  # Distributed training configuration
+  # Note: Use `accelerate launch train.py` or `torchrun --nproc_per_node 4 train.py` to enable
+  # Setting enabled=true here is informational; actual distributed mode is detected from WORLD_SIZE env var
   distributed:
-    enabled: false
+    enabled: true  # Set to true when using multi-GPU (informational, actual mode auto-detected)
+    # These fields are for MLX-specific distributed training (not used with PyTorch/Accelerate)
     num_machines: 1
     num_processes_per_machine: 1
-    backend: "ring"  # "ring" or "mpi"
+    backend: "ring"  # "ring" or "mpi" (MLX only)
     main_process_port: 29500
   compile:
     enabled: false          # Enable torch.compile for training (CUDA only, auto-disabled on MPS/CPU)

@@ -133,7 +133,6 @@ def _scaffold_metrics_from_stats(stats, accelerator: Accelerator):
 
     return {
         "avg_scaffold_size": mean,
-        "avg_mask_count": stats["mask_sum"].item() / count if count > 0 else 0.0,
         "avg_null_ratio": stats["null_ratio_sum"].item() / count if count > 0 else 0.0,
         "scaffold_size_std": std,
         "max_scaffold_size": max_vals.max().item(),

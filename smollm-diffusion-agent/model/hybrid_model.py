@@ -65,6 +65,7 @@ class HybridSmolLM(nn.Module):
         entropy_weight = diffusion_config.get("entropy_weight", 0.05)
         use_optimized_attention = diffusion_config.get("use_optimized_attention", True)
         training_temperature = diffusion_config.get("training_temperature", 1.0)
+        repetition_penalty = diffusion_config.get("repetition_penalty", 0.0)
 
         self.diffusion_head = SchemaDiffusionHead(
             input_dim=hidden_size,
@@ -80,6 +81,8 @@ class HybridSmolLM(nn.Module):
             entropy_weight=entropy_weight,
             use_optimized_attention=use_optimized_attention,
             training_temperature=training_temperature,
+            repetition_penalty=repetition_penalty,
+            max_seq_len=max_seq_length,
         )
 
         self.diffusion_head = self.diffusion_head.to(dtype=torch.bfloat16)
@@ -88,12 +91,20 @@ class HybridSmolLM(nn.Module):
                           enable_unsloth_inference_opt=True):
         """Initialize PyTorch model (supports CUDA with quantization, MPS, and CPU)."""
         cuda_available = torch.cuda.is_available()
+        
+        # Check if we're in distributed training mode
+        is_distributed = int(os.environ.get("WORLD_SIZE", 1)) > 1
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
         if use_unsloth is None:
-            use_unsloth = cuda_available
+            use_unsloth = cuda_available and not is_distributed
 
         if use_unsloth and not cuda_available:
             print("Warning: unsloth requires CUDA, disabling on non-CUDA device")
+            use_unsloth = False
+
+        if use_unsloth and is_distributed:
+            print("Warning: unsloth not stable with DDP, disabling in multi-GPU mode")
             use_unsloth = False
 
         if load_in_4bit and not cuda_available:
@@ -148,19 +159,38 @@ class HybridSmolLM(nn.Module):
                 print("Enabling FlashAttention-2 for base model")
 
             if device.type == "cuda":
-                device_index = device.index if device.index is not None else 0
-                if load_in_4bit:
-                    print("Loading model with 4-bit quantization on CUDA")
-                    kwargs["quantization_config"] = BitsAndBytesConfig(
-                        load_in_4bit=True,
-                        bnb_4bit_compute_dtype=torch.bfloat16,
-                        bnb_4bit_use_double_quant=True,
-                        bnb_4bit_quant_type="nf4"
-                    )
-                    kwargs["device_map"] = get_device_map_for_quantization(device)
+                # In DDP mode, use device directly (Accelerate will handle placement)
+                # device_map should NOT be "auto" or dict in DDP, let Accelerate handle it
+                if is_distributed:
+                    print(f"Loading model for DDP on rank {local_rank} (device: {device})")
+                    if load_in_4bit:
+                        print("  Using 4-bit quantization with DDP")
+                        kwargs["quantization_config"] = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_compute_dtype=torch.bfloat16,
+                            bnb_4bit_use_double_quant=True,
+                            bnb_4bit_quant_type="nf4"
+                        )
+                        # For DDP with quantization: no device_map, Accelerate will move to correct device
+                        # bitsandbytes will automatically use the CUDA device set by torch.cuda.set_device()
+                    else:
+                        print("  Using bfloat16 (no quantization) with DDP")
+                        # No device_map for DDP, let Accelerate handle device placement
                 else:
-                    print("Loading model in bfloat16 on CUDA")
-                    kwargs["device_map"] = {"": device_index}
+                    # Single GPU mode: use explicit device_map
+                    device_index = device.index if device.index is not None else 0
+                    if load_in_4bit:
+                        print("Loading model with 4-bit quantization on CUDA")
+                        kwargs["quantization_config"] = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_compute_dtype=torch.bfloat16,
+                            bnb_4bit_use_double_quant=True,
+                            bnb_4bit_quant_type="nf4"
+                        )
+                        kwargs["device_map"] = get_device_map_for_quantization(device)
+                    else:
+                        print("Loading model in bfloat16 on CUDA")
+                        kwargs["device_map"] = {"": device_index}
             elif device.type == "mps":
                 print("Loading model in bfloat16 on MPS (Apple Silicon)")
                 kwargs["device_map"] = "auto"
@@ -208,6 +238,19 @@ class HybridSmolLM(nn.Module):
             position_ids=position_ids
         )
         return outputs
+
+    def get_trainable_state_dict(self):
+        """Get only the trainable parameters (diffusion_head)."""
+        full_state_dict = self.state_dict()
+        return {k: v for k, v in full_state_dict.items() if k.startswith('diffusion_head.')}
+    
+    def load_trainable_state_dict(self, state_dict, strict=False):
+        """Load only trainable parameters, filtering to diffusion_head keys.
+        
+        Note: Ensure tensors in state_dict are on the correct device before calling.
+        """
+        filtered_state = {k: v for k, v in state_dict.items() if k.startswith('diffusion_head.')}
+        return self.load_state_dict(filtered_state, strict=strict)
 
     def forward(self, input_ids, attention_mask,
                 labels=None, scaffold_mask=None, return_logits=False):

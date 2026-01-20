@@ -81,31 +81,30 @@ def demo_inference():
         checkpoint = torch.load(checkpoint_path, map_location=device)
 
         checkpoint_state = checkpoint['model_state_dict']
-        model_state = model.state_dict()
-
-        filtered_state = {}
-        skipped_keys = []
-        loaded_keys = []
-
-        for key, value in checkpoint_state.items():
-            if key.startswith('diffusion_head.'):
-                if key in model_state:
-                    if model_state[key].shape == value.shape:
-                        filtered_state[key] = value.cpu()
-                        loaded_keys.append(key)
-                    else:
-                        skipped_keys.append(f"{key} (shape mismatch)")
-                else:
-                    skipped_keys.append(f"{key} (not in model)")
-            else:
-                skipped_keys.append(f"{key} (base_llm, skipped)")
-
-        if filtered_state:
-            filtered_state = {k: v.to(device) for k, v in filtered_state.items()}
-            model.load_state_dict(filtered_state, strict=False)
-            print(f"Loaded {len(loaded_keys)} diffusion head weights from checkpoint")
+        checkpoint_state = {k: v.to(device) for k, v in checkpoint_state.items()}
+        
+        if hasattr(model, 'load_trainable_state_dict'):
+            missing_keys, unexpected_keys = model.load_trainable_state_dict(
+                checkpoint_state, strict=False
+            )
+            num_loaded = len([k for k in checkpoint_state.keys() if k.startswith('diffusion_head.')])
+            print(f"Loaded {num_loaded} trainable parameters from checkpoint")
         else:
-            print("Warning: No compatible weights found, using untrained model")
+            model_state = model.state_dict()
+            filtered_state = {}
+            loaded_keys = []
+            
+            for key, value in checkpoint_state.items():
+                if key.startswith('diffusion_head.'):
+                    if key in model_state and model_state[key].shape == value.shape:
+                        filtered_state[key] = value
+                        loaded_keys.append(key)
+            
+            if filtered_state:
+                model.load_state_dict(filtered_state, strict=False)
+                print(f"Loaded {len(loaded_keys)} diffusion head weights from checkpoint")
+            else:
+                print("Warning: No compatible weights found, using untrained model")
 
         if 'epoch' in checkpoint:
             print(f"Checkpoint info: epoch {checkpoint['epoch']}, eval loss: {checkpoint.get('eval_loss', 'N/A')}")

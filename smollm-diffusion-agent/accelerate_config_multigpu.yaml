@@ -1,0 +1,26 @@
+compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: MULTI_GPU
+downcast_bf16: 'no'
+gpu_ids: all
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 4  # 4x RTX 4090 setup
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+
+# DDP-specific settings for 4x RTX 4090
+# Note: When using 4-bit quantization with bitsandbytes, each GPU loads its own copy
+# of the quantized model. The diffusion head is then wrapped with DDP for gradient sync.
+# 
+# Config settings:
+# - batch_size: 24 (6 per GPU)
+# - effective batch: 24 * 4 * 4 = 384
+# - epochs: 6 (faster convergence with larger batch)
+# - learning_rate: 1.2e-4 (slightly increased for larger batch)
