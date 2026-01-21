@@ -7,7 +7,7 @@ model:
   unsloth_use_gradient_checkpointing: "unsloth"  # "unsloth" = custom async offloading (30% VRAM save), true = standard, false = disabled
   unsloth_rope_scaling: null  # null = auto, or dict like {"type": "linear", "factor": 2.0} for longer contexts
   # Speed optimizations for base model (disable if using unsloth, as it has built-in optimizations)
-  use_flash_attention: false  # Disable FlashAttention-2 (fallback to SDPA/xformers)
+  use_flash_attention: true  # Use FlashAttention-2 for base model (2-3x faster, 40-60% memory reduction on CUDA). Auto-disabled if unsloth is used or if import fails.
   use_gradient_checkpointing: true  # Enable gradient checkpointing (30-50% memory reduction, ~10% slower). Auto-disabled if unsloth is used.
   use_better_transformer: false  # Enable BetterTransformer (20-30% speedup, conflicts with quantization and unsloth)
 

@@ -1,5 +1,5 @@
 # Core dependencies (all platforms)
-torch>=2.0.0
+torch==2.9.0
 transformers>=4.45.0
 accelerate>=0.20.0
 datasets>=2.12.0
@@ -12,7 +12,6 @@ git+https://github.com/KellerJordan/Muon
 
 # CUDA-specific dependencies (install separately on Linux/Windows with NVIDIA GPU)
 bitsandbytes>=0.41.0  # 4-bit quantization
-flash-attn>=2.0.0  # FlashAttention-2 (2-3x speedup + 40-60% memory reduction)
 triton>=2.0.0  # CUDA kernel compilation (required by flash-attn)
 unsloth  # Faster training/inference
 xformers  # Memory-efficient attention (alternative to flash-attn)
@@ -23,3 +22,4 @@ optimum  # BetterTransformer (may conflict with quantization)
 
 # Note: For Mac (MPS), use standard PyTorch with bfloat16
 # Note: For MLX on Apple Silicon, see separate train_mlx.py
+https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.0/flash_attn-2.8.3%2Bcu128torch2.9-cp311-cp311-linux_x86_64.whl
