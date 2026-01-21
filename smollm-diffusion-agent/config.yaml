@@ -38,7 +38,7 @@ diffusion:
 # Effective batch size = batch_size * num_gpus * gradient_accumulation_steps = 4 * 4 * 4 = 64
 # Note: batch_size 6 OOMs due to diffusion head output_proj ([batch, seq, vocab=128K] tensor)
 training:
-  batch_size: 4  # Per GPU. Effective = 4 * 4 GPUs * 4 grad_accum = 64
+  batch_size: 3  # Per GPU. Effective = 4 * 4 GPUs * 4 grad_accum = 64
   learning_rate: 1.2e-4  # Slightly increased for larger effective batch (384 vs previous 32-48)
   optimizer:
     name: "muon"
