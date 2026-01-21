@@ -66,6 +66,7 @@ class HybridSmolLM(nn.Module):
         use_optimized_attention = diffusion_config.get("use_optimized_attention", True)
         training_temperature = diffusion_config.get("training_temperature", 1.0)
         repetition_penalty = diffusion_config.get("repetition_penalty", 0.0)
+        use_attention_mask = diffusion_config.get("use_attention_mask", False)
 
         self.diffusion_head = SchemaDiffusionHead(
             input_dim=hidden_size,
@@ -83,6 +84,7 @@ class HybridSmolLM(nn.Module):
             training_temperature=training_temperature,
             repetition_penalty=repetition_penalty,
             max_seq_len=max_seq_length,
+            use_attention_mask=use_attention_mask,
         )
 
         self.diffusion_head = self.diffusion_head.to(dtype=torch.bfloat16)
@@ -291,6 +293,9 @@ class HybridSmolLM(nn.Module):
                     tokens=labels,
                     hidden_states=hidden_states,
                     scaffold_mask=scaffold_mask,
+                    attention_mask=(
+                        attention_mask if self.diffusion_head.use_bidirectional else None
+                    ) if self.diffusion_head.training and self.diffusion_head.use_attention_mask else None,
                 )
                 diff_loss = output["loss"]
                 predictions = output.get("predictions")
@@ -298,7 +303,10 @@ class HybridSmolLM(nn.Module):
                 diff_loss = self.diffusion_head.training_step(
                     tokens=labels,
                     hidden_states=hidden_states,
-                    scaffold_mask=scaffold_mask
+                    scaffold_mask=scaffold_mask,
+                    attention_mask=(
+                        attention_mask if self.diffusion_head.use_bidirectional else None
+                    ) if self.diffusion_head.training and self.diffusion_head.use_attention_mask else None,
                 )
             total_loss = total_loss + diff_loss
             losses["diffusion"] = diff_loss

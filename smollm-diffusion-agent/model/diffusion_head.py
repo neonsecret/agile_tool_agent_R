@@ -37,7 +37,7 @@ class SchemaDiffusionHead(nn.Module):
                  label_smoothing=0.1, use_bidirectional=True, num_heads=8,
                  null_loss_weight=0.3, null_prediction_penalty=0.0, entropy_weight=0.05,
                  use_optimized_attention=True, training_temperature=1.0,
-                 repetition_penalty=0.0, max_seq_len=2048):
+                 repetition_penalty=0.0, max_seq_len=2048, use_attention_mask=False):
         """
         Args:
             input_dim: Dimension of hidden states from base model
@@ -66,6 +66,7 @@ class SchemaDiffusionHead(nn.Module):
         self.use_optimized_attention = use_optimized_attention
         self.training_temperature = training_temperature
         self.repetition_penalty = repetition_penalty
+        self.use_attention_mask = use_attention_mask
 
         self.noise = LogLinearNoise()
 
@@ -193,7 +194,7 @@ class SchemaDiffusionHead(nn.Module):
         logits = self.output_proj(x)
         return logits
 
-    def _compute_hidden(self, hidden_states, current_tokens, t):
+    def _compute_hidden(self, hidden_states, current_tokens, t, attention_mask=None):
         """Compute hidden representations without output projection (memory efficient)."""
         batch_size, seq_len = hidden_states.shape[:2]
 
@@ -215,14 +216,14 @@ class SchemaDiffusionHead(nn.Module):
 
         if self.use_bidirectional:
             for block in self.denoise_blocks:
-                x = block(x, attention_mask=None)
+                x = block(x, attention_mask=attention_mask)
         else:
             for block in self.denoise_blocks:
                 x = x + block(x)
 
         return x
 
-    def training_step(self, tokens, hidden_states, scaffold_mask):
+    def training_step(self, tokens, hidden_states, scaffold_mask, attention_mask=None):
         """
         Full training forward pass with diffusion loss.
 
@@ -257,7 +258,7 @@ class SchemaDiffusionHead(nn.Module):
             return torch.tensor(0.0, device=tokens.device, requires_grad=True)
 
         # Memory optimization: compute hidden states, then output_proj only on masked positions
-        x = self._compute_hidden(hidden_states, noisy_tokens, t)
+        x = self._compute_hidden(hidden_states, noisy_tokens, t, attention_mask=attention_mask)
         active_hidden = x[valid_mask_positions]
         active_logits = self.output_proj(active_hidden)
         active_labels = tokens[valid_mask_positions]
@@ -266,7 +267,7 @@ class SchemaDiffusionHead(nn.Module):
 
         return loss
 
-    def training_step_with_outputs(self, tokens, hidden_states, scaffold_mask):
+    def training_step_with_outputs(self, tokens, hidden_states, scaffold_mask, attention_mask=None):
         """Training step that also returns predictions for metrics."""
         batch_size = tokens.shape[0]
 
@@ -301,7 +302,7 @@ class SchemaDiffusionHead(nn.Module):
             }
 
         # Compute loss efficiently (only output_proj on masked positions)
-        x = self._compute_hidden(hidden_states, noisy_tokens, t)
+        x = self._compute_hidden(hidden_states, noisy_tokens, t, attention_mask=attention_mask)
         active_hidden = x[valid_mask_positions]
         active_logits = self.output_proj(active_hidden)
         active_labels = tokens[valid_mask_positions]
@@ -375,13 +376,7 @@ class SchemaDiffusionHead(nn.Module):
             entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1).mean()
             loss = loss - self.entropy_weight * entropy
 
-        # Repetition penalty: penalize consecutive identical predictions
-        if self.repetition_penalty > 0 and active_logits.numel() > 1:
-            predictions = active_logits.argmax(dim=-1)
-            consecutive_same = (predictions[1:] == predictions[:-1]).float()
-            if consecutive_same.numel() > 0:
-                rep_penalty = consecutive_same.mean() * self.repetition_penalty
-                loss = loss + rep_penalty
+        # Repetition penalty intentionally disabled for masked-position logits.
 
         return loss
 

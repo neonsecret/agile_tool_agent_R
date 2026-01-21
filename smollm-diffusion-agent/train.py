@@ -254,6 +254,7 @@ def train():
     start_epoch = 0
     best_eval_loss = float('inf')
     global_step = 0
+    batch_step = 0
 
     if training_cfg.get("resume_from_checkpoint", False):
         checkpoint_path = training_cfg.get("checkpoint_path", "checkpoints/best_model/model.pt")
@@ -286,6 +287,7 @@ def train():
                 logger.debug(f"cudagraph_mark_step_begin not available: {e}")
 
             with accelerator.accumulate(model):
+                batch_step += 1
                 outputs = model(
                     input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
@@ -328,7 +330,7 @@ def train():
                     did_step = True
 
                     # Log metrics to wandb (only on update steps)
-                    logs = {"train/step": global_step}
+                    logs = {"train/step": global_step, "train/batch_step": batch_step}
                     if has_loss:
                         logs["train/total_loss"] = loss_val
                         for k, v in losses_detail.items():
@@ -338,15 +340,16 @@ def train():
                     if global_step % 50 == 0 and outputs.get("predictions") is not None:
                         with torch.no_grad():
                             predictions = outputs["predictions"]
+                            mask_positions = outputs.get("mask_positions", batch["scaffold_mask"])
                             counts = _compute_null_counts(
                                 predictions,
                                 batch["labels"],
-                                batch["scaffold_mask"],
+                                mask_positions,
                                 null_token_id,
                             )
                             div_counts = _compute_diversity_counts(
                                 predictions,
-                                batch["scaffold_mask"],
+                                mask_positions,
                             )
                             if counts is not None:
                                 counts.update(div_counts)

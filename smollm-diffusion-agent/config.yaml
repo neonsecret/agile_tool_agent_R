@@ -27,11 +27,12 @@ diffusion:
   label_smoothing: 0.1  # Reduces overconfidence, improves generalization
   use_bidirectional: true  # Use bidirectional attention for global constraint verification
   use_optimized_attention: true  # Use SDPA-optimized attention (2-3x faster, FlashAttention on CUDA)
+  use_attention_mask: false  # Avoids padding attention during training
   null_loss_weight: 0.1  # Down-weight NULL labels to avoid NULL-dominant solutions
   null_prediction_penalty: 0.3  # Penalize NULL predictions on non-NULL labels
   entropy_weight: 0.025  # Reduced from 0.07: high entropy causes random garbage, lower value stabilizes
   training_temperature: 1.2  # Reduced from 1.5: less smoothing to reduce low-confidence token spam
-  repetition_penalty: 0.3  # Penalize consecutive identical token predictions (prevents "ativityativityativity")
+  repetition_penalty: 0.0  # Disabled by default (masked positions are non-contiguous)
 
 # Training Configuration
 # Optimized for 4x RTX 4090 (24GB each) with 4-bit quantization
@@ -41,7 +42,7 @@ training:
   batch_size: 4
   learning_rate: 1.2e-4  # Slightly increased for larger effective batch (384 vs previous 32-48)
   optimizer:
-    name: "muon"
+    name: "adamw"
     muon:
       lr: 1.2e-4
       momentum: 0.95
@@ -72,7 +73,7 @@ training:
   checkpoint_path: "checkpoints/best_model/model.pt"
   eval_every_n_steps: 1000  # Run functional evaluation every N steps
   eval_num_samples: 10  # Number of samples to evaluate on
-  warmup_steps: 2000  # Reduced from 2500: fewer total steps with larger batch, adjust proportionally
+  warmup_steps: 300  # Short warmup; gradient_accum makes batch-step progress faster than optimizer steps
   min_lr_ratio: 0.01  # Minimum LR as fraction of peak (0.01 = 1% of learning_rate, e.g., 1.2e-6)
   ddp_find_unused_parameters: true
   compile:

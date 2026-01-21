@@ -174,10 +174,11 @@ def evaluate(model, eval_dataloader, accelerator, null_token_id=None, return_log
                 logits = outputs["logits"]
                 predictions = torch.argmax(logits, dim=-1)
             if predictions is not None:
+                mask_positions = outputs.get("mask_positions", batch["scaffold_mask"])
                 batch_null_counts = _compute_null_counts(
                     predictions,
                     batch["labels"],
-                    batch["scaffold_mask"],
+                    mask_positions,
                     null_token_id,
                 )
                 if batch_null_counts is not None:
