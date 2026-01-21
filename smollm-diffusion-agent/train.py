@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, random_split
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 from accelerate import Accelerator
-from accelerate.utils import set_seed
+from accelerate.utils import set_seed, DistributedDataParallelKwargs
 from tqdm.auto import tqdm
 import wandb
 from data.device_utils import empty_cache, get_device
@@ -59,10 +59,14 @@ def train():
     is_distributed = dist_cfg.get("enabled", False)
     
     # 1. Initialize Accelerator with W&B FIRST (so we get proper device assignment)
+    ddp_kwargs = None
+    if training_cfg.get("ddp_find_unused_parameters", False):
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=training_cfg["gradient_accumulation_steps"],
         log_with="wandb" if training_cfg["use_wandb"] else None,
-        mixed_precision="bf16"  # Use bfloat16 to match model dtype
+        mixed_precision="bf16",  # Use bfloat16 to match model dtype
+        kwargs_handlers=[ddp_kwargs] if ddp_kwargs else None,
     )
     set_seed(training_cfg["seed"])
 
@@ -291,24 +295,26 @@ def train():
                 )
 
                 loss = outputs["loss"]
-
-                if loss is None:
-                    continue
+                losses_detail = outputs.get("losses", {})
+                has_loss = loss is not None
+                if not has_loss:
+                    # Ensure all ranks run backward to avoid DDP/NCCL hangs
+                    loss = next(model.diffusion_head.parameters()).sum() * 0.0
 
                 loss_val = loss.item()
-                losses_detail = outputs.get("losses", {})
 
-                # Track losses
-                epoch_loss += loss_val
-                num_batches += 1
-                if "diffusion" in losses_detail:
-                    epoch_diffusion_loss += losses_detail["diffusion"].item()
+                if has_loss:
+                    # Track losses
+                    epoch_loss += loss_val
+                    num_batches += 1
+                    if "diffusion" in losses_detail:
+                        epoch_diffusion_loss += losses_detail["diffusion"].item()
 
-                # Update progress bar
-                progress_bar.set_postfix({
-                    'loss': f'{loss_val:.4f}',
-                    'avg_loss': f'{epoch_loss / num_batches:.4f}'
-                })
+                    # Update progress bar
+                    progress_bar.set_postfix({
+                        'loss': f'{loss_val:.4f}',
+                        'avg_loss': f'{epoch_loss / num_batches:.4f}'
+                    })
 
                 accelerator.backward(loss)
 
@@ -322,9 +328,11 @@ def train():
                     did_step = True
 
                     # Log metrics to wandb (only on update steps)
-                    logs = {"train/total_loss": loss_val, "train/step": global_step}
-                    for k, v in losses_detail.items():
-                        logs[f"train/{k}_loss"] = v.item() if torch.is_tensor(v) else v
+                    logs = {"train/step": global_step}
+                    if has_loss:
+                        logs["train/total_loss"] = loss_val
+                        for k, v in losses_detail.items():
+                            logs[f"train/{k}_loss"] = v.item() if torch.is_tensor(v) else v
 
                     # Add NULL token and diversity metrics every 50 steps
                     if global_step % 50 == 0 and outputs.get("predictions") is not None:

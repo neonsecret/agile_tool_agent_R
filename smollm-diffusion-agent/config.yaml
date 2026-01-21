@@ -38,7 +38,7 @@ diffusion:
 # Effective batch size = batch_size * num_gpus * gradient_accumulation_steps = 4 * 4 * 4 = 64
 # Note: batch_size 6 OOMs due to diffusion head output_proj ([batch, seq, vocab=128K] tensor)
 training:
-  batch_size: 3  # Per GPU. Effective = 4 * 4 GPUs * 4 grad_accum = 64
+  batch_size: 4
   learning_rate: 1.2e-4  # Slightly increased for larger effective batch (384 vs previous 32-48)
   optimizer:
     name: "muon"
@@ -74,6 +74,7 @@ training:
   eval_num_samples: 10  # Number of samples to evaluate on
   warmup_steps: 2000  # Reduced from 2500: fewer total steps with larger batch, adjust proportionally
   min_lr_ratio: 0.01  # Minimum LR as fraction of peak (0.01 = 1% of learning_rate, e.g., 1.2e-6)
+  ddp_find_unused_parameters: true
   compile:
     enabled: false          # Enable torch.compile for training (CUDA only, auto-disabled on MPS/CPU)
     mode: "reduce-overhead" # Compilation mode: default, reduce-overhead, or max-autotune
