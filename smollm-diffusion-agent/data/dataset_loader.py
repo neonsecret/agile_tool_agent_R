@@ -1,5 +1,8 @@
 import json
+import hashlib
+import pickle
 import torch
+import torch.distributed as dist
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -69,7 +72,7 @@ class SmartScaffoldDataset(Dataset):
         self.config = data_config or self._load_default_config()
         self.dynamic_budget = self._get_dynamic_budget_config(self.config)
         self.ds = self._load_dataset(split, self.config)
-        self.processed_examples = self._process_dataset()
+        self.processed_examples = self._load_or_build_processed_examples()
 
     def _load_dataset(self, split: str, data_config: Dict[str, Any]):
         return load_multi_dataset_from_config(data_config)
@@ -112,6 +115,79 @@ class SmartScaffoldDataset(Dataset):
                     self._process_tool_call(msg, msg_idx, conversations, tools_schema, processed)
 
         print(f"Processed {len(processed)} examples, {failed} failed.")
+        return processed
+
+    def _cache_config(self) -> Dict[str, Any]:
+        data_cfg = self.config.get("data", {})
+        cache_cfg = data_cfg.get("cache", {})
+        return {
+            "enabled": cache_cfg.get("enabled", False),
+            "dir": cache_cfg.get("dir", "data_cache"),
+        }
+
+    def _cache_fingerprint(self) -> str:
+        data_cfg = self.config.get("data", {})
+        training_cfg = self.config.get("training", {})
+        payload = {
+            "datasets": data_cfg.get("datasets"),
+            "dataset_name": data_cfg.get("dataset_name"),
+            "limit": data_cfg.get("limit"),
+            "mask_budget": self.mask_budget,
+            "dynamic_budget": self.dynamic_budget,
+            "mask_token": self.mask_token,
+            "null_token": self.null_token,
+            "system_message": self.system_message,
+            "max_history_messages": self.max_history_messages,
+            "max_new_tokens": self.max_new_tokens,
+            "max_seq_len": training_cfg.get("max_seq_len"),
+            "tokenizer": getattr(self.tokenizer, "name_or_path", None),
+        }
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+    def _cache_path(self) -> Optional[Path]:
+        cache_cfg = self._cache_config()
+        if not cache_cfg["enabled"]:
+            return None
+        root = Path(__file__).resolve().parents[1]
+        cache_dir = root / cache_cfg["dir"]
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        fingerprint = self._cache_fingerprint()
+        return cache_dir / f"processed_{fingerprint}.pkl"
+
+    def _load_cache(self, path: Path) -> List[Dict[str, Any]]:
+        print(f"Loading processed dataset cache: {path}")
+        with path.open("rb") as handle:
+            return pickle.load(handle)
+
+    def _save_cache(self, path: Path, processed: List[Dict[str, Any]]) -> None:
+        tmp_path = path.with_suffix(".tmp")
+        with tmp_path.open("wb") as handle:
+            pickle.dump(processed, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp_path.replace(path)
+        print(f"Saved processed dataset cache: {path}")
+
+    @staticmethod
+    def _is_distributed() -> bool:
+        return dist.is_available() and dist.is_initialized()
+
+    def _load_or_build_processed_examples(self) -> List[Dict[str, Any]]:
+        cache_path = self._cache_path()
+        if cache_path is None:
+            return self._process_dataset()
+        if cache_path.exists():
+            return self._load_cache(cache_path)
+
+        if self._is_distributed() and dist.get_rank() != 0:
+            dist.barrier()
+            return self._load_cache(cache_path)
+
+        processed = self._process_dataset()
+        self._save_cache(cache_path, processed)
+
+        if self._is_distributed():
+            dist.barrier()
+
         return processed
 
     def _process_tool_call(self, msg, msg_idx, conversations, tools_schema, processed):

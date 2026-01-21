@@ -184,23 +184,50 @@ class SchemaDiffusionHead(nn.Module):
         x = context + token_emb + t_emb + pos_emb
 
         if self.use_bidirectional:
-            # Bidirectional attention blocks
             for block in self.denoise_blocks:
                 x = block(x, attention_mask=attention_mask)
         else:
-            # Original residual MLP blocks
             for block in self.denoise_blocks:
                 x = x + block(x)
 
         logits = self.output_proj(x)
         return logits
 
+    def _compute_hidden(self, hidden_states, current_tokens, t):
+        """Compute hidden representations without output projection (memory efficient)."""
+        batch_size, seq_len = hidden_states.shape[:2]
+
+        context = self.input_proj(hidden_states)
+        safe_tokens = current_tokens.clone()
+        safe_tokens[safe_tokens < 0] = 0
+        token_emb = self.token_emb(safe_tokens)
+
+        if isinstance(t, (int, float)):
+            t_tensor = torch.full((batch_size,), t, device=hidden_states.device, dtype=torch.float)
+        else:
+            t_tensor = t.float()
+
+        t_indices = (t_tensor * self.num_steps).long().clamp(0, self.num_steps)
+        t_emb = self.time_embed(t_indices).unsqueeze(1)
+        pos_emb = self.position_embeddings[:seq_len].unsqueeze(0).to(hidden_states.dtype)
+
+        x = context + token_emb + t_emb + pos_emb
+
+        if self.use_bidirectional:
+            for block in self.denoise_blocks:
+                x = block(x, attention_mask=None)
+        else:
+            for block in self.denoise_blocks:
+                x = x + block(x)
+
+        return x
+
     def training_step(self, tokens, hidden_states, scaffold_mask):
         """
         Full training forward pass with diffusion loss.
 
-        From mdlm diffusion.py _forward_pass_diffusion.
-        Uses label smoothing to reduce overconfidence and improve generalization.
+        Memory-optimized: only computes output_proj on masked positions to avoid
+        materializing full [batch, seq, vocab] tensor (~3GB with batch=6, seq=2048).
 
         Args:
             tokens: [batch, seq_len] clean tokens (labels, may contain -100)
@@ -224,14 +251,15 @@ class SchemaDiffusionHead(nn.Module):
             tokens, scaffold_mask, t
         )
 
-        logits = self.predict(hidden_states, noisy_tokens, t)
-
         valid_mask_positions = mask_positions & valid_labels
 
         if valid_mask_positions.sum() == 0:
             return torch.tensor(0.0, device=tokens.device, requires_grad=True)
 
-        active_logits = logits[valid_mask_positions]
+        # Memory optimization: compute hidden states, then output_proj only on masked positions
+        x = self._compute_hidden(hidden_states, noisy_tokens, t)
+        active_hidden = x[valid_mask_positions]
+        active_logits = self.output_proj(active_hidden)
         active_labels = tokens[valid_mask_positions]
 
         loss = self._compute_loss(active_logits, active_labels, t.mean())
@@ -239,6 +267,7 @@ class SchemaDiffusionHead(nn.Module):
         return loss
 
     def training_step_with_outputs(self, tokens, hidden_states, scaffold_mask):
+        """Training step that also returns predictions for metrics."""
         batch_size = tokens.shape[0]
 
         valid_labels = tokens >= 0
@@ -248,7 +277,7 @@ class SchemaDiffusionHead(nn.Module):
             loss = torch.tensor(0.0, device=tokens.device, requires_grad=True)
             return {
                 "loss": loss,
-                "logits": None,
+                "predictions": None,
                 "mask_positions": None,
                 "noisy_tokens": None,
                 "t": None,
@@ -260,26 +289,30 @@ class SchemaDiffusionHead(nn.Module):
             tokens, scaffold_mask, t
         )
 
-        logits = self.predict(hidden_states, noisy_tokens, t)
-
         valid_mask_positions = mask_positions & valid_labels
         if valid_mask_positions.sum() == 0:
             loss = torch.tensor(0.0, device=tokens.device, requires_grad=True)
             return {
                 "loss": loss,
-                "logits": logits,
+                "predictions": None,
                 "mask_positions": mask_positions,
                 "noisy_tokens": noisy_tokens,
                 "t": t,
             }
 
-        active_logits = logits[valid_mask_positions]
+        # Compute loss efficiently (only output_proj on masked positions)
+        x = self._compute_hidden(hidden_states, noisy_tokens, t)
+        active_hidden = x[valid_mask_positions]
+        active_logits = self.output_proj(active_hidden)
         active_labels = tokens[valid_mask_positions]
         loss = self._compute_loss(active_logits, active_labels, t.mean())
 
+        predictions = torch.full_like(tokens, -100)
+        predictions[valid_mask_positions] = active_logits.argmax(dim=-1)
+
         return {
             "loss": loss,
-            "logits": logits,
+            "predictions": predictions,
             "mask_positions": mask_positions,
             "noisy_tokens": noisy_tokens,
             "t": t,

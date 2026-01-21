@@ -327,10 +327,9 @@ def train():
                         logs[f"train/{k}_loss"] = v.item() if torch.is_tensor(v) else v
 
                     # Add NULL token and diversity metrics every 50 steps
-                    if global_step % 50 == 0 and outputs.get("logits") is not None:
+                    if global_step % 50 == 0 and outputs.get("predictions") is not None:
                         with torch.no_grad():
-                            logits = outputs["logits"]
-                            predictions = torch.argmax(logits, dim=-1)
+                            predictions = outputs["predictions"]
                             counts = _compute_null_counts(
                                 predictions,
                                 batch["labels"],

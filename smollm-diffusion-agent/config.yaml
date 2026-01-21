@@ -35,9 +35,10 @@ diffusion:
 
 # Training Configuration
 # Optimized for 4x RTX 4090 (24GB each) with 4-bit quantization
-# Effective batch size = batch_size * num_gpus * gradient_accumulation_steps = 24 * 4 * 4 = 384
+# Effective batch size = batch_size * num_gpus * gradient_accumulation_steps = 4 * 4 * 4 = 64
+# Note: batch_size 6 OOMs due to diffusion head output_proj ([batch, seq, vocab=128K] tensor)
 training:
-  batch_size: 24  # 6 per GPU on 4x RTX 4090 (24GB each). Safe with 4-bit quantization + FlashAttention
+  batch_size: 4  # Per GPU. Effective = 4 * 4 GPUs * 4 grad_accum = 64
   learning_rate: 1.2e-4  # Slightly increased for larger effective batch (384 vs previous 32-48)
   optimizer:
     name: "muon"
@@ -125,5 +126,8 @@ data:
   system_message: "/no_think"  # SmolLM3 chat_template uses /think or /no_think in system message
   max_history_messages: 12     # Keep last N chat messages before the tool call to fit max_seq_len
   chat_sampling_rate: 0.1  # Sampling rate for chat examples (non-tool calls). 0.1 = 10% of chat turns
-  bucket_sizes: [ 512, 1024, 1536, 2048 ]  # Fixed buckets for padding/compile stability
+  bucket_sizes: [ 512, 1024, 1280, 1536, 1792, 2048 ]  # Buckets align with 90th/95th percentiles
+  cache:
+    enabled: true
+    dir: "data_cache"
 

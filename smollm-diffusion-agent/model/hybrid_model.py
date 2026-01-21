@@ -284,7 +284,7 @@ class HybridSmolLM(nn.Module):
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)
         losses = {}
 
-        logits = None
+        predictions = None
         if labels is not None and scaffold_mask is not None and scaffold_mask.sum() > 0:
             if return_logits:
                 output = self.diffusion_head.training_step_with_outputs(
@@ -293,7 +293,7 @@ class HybridSmolLM(nn.Module):
                     scaffold_mask=scaffold_mask,
                 )
                 diff_loss = output["loss"]
-                logits = output["logits"]
+                predictions = output.get("predictions")
             else:
                 diff_loss = self.diffusion_head.training_step(
                     tokens=labels,
@@ -308,6 +308,6 @@ class HybridSmolLM(nn.Module):
             "loss": total_loss if has_loss else None,
             "losses": losses
         }
-        if logits is not None:
-            output["logits"] = logits
+        if predictions is not None:
+            output["predictions"] = predictions
         return output

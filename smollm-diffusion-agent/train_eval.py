@@ -169,9 +169,11 @@ def evaluate(model, eval_dataloader, accelerator, null_token_id=None, return_log
                 if "diffusion" in losses_detail:
                     total_diffusion_loss += losses_detail["diffusion"].detach()
 
-            if "logits" in outputs:
+            predictions = outputs.get("predictions")
+            if predictions is None and "logits" in outputs:
                 logits = outputs["logits"]
                 predictions = torch.argmax(logits, dim=-1)
+            if predictions is not None:
                 batch_null_counts = _compute_null_counts(
                     predictions,
                     batch["labels"],
