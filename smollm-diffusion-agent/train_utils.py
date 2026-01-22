@@ -254,6 +254,10 @@ def _build_one_cycle_scheduler(optimizer, training_cfg, total_training_steps):
     scheduler_cfg = training_cfg.get("scheduler", {})
     max_lr = _resolve_one_cycle_max_lr(optimizer, training_cfg)
     pct_start = float(scheduler_cfg.get("pct_start", 0.1))
+    warmup_steps = training_cfg.get("warmup_steps")
+    use_warmup_steps = scheduler_cfg.get("use_warmup_steps", True)
+    if use_warmup_steps and warmup_steps is not None and total_training_steps > 0:
+        pct_start = max(0.01, min(0.5, float(warmup_steps) / float(total_training_steps)))
     anneal_strategy = scheduler_cfg.get("anneal_strategy", "cos")
     div_factor = float(scheduler_cfg.get("div_factor", 25.0))
     final_div_factor = float(scheduler_cfg.get("final_div_factor", 1e4))
@@ -274,6 +278,7 @@ def _build_one_cycle_scheduler(optimizer, training_cfg, total_training_steps):
         "name": "one_cycle",
         "max_lr": max_lr,
         "pct_start": pct_start,
+        "use_warmup_steps": use_warmup_steps,
         "anneal_strategy": anneal_strategy,
         "div_factor": div_factor,
         "final_div_factor": final_div_factor,
