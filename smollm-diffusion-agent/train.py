@@ -30,6 +30,7 @@ from train_utils import (
     load_checkpoint,
     build_scheduler,
     build_optimizer,
+    safe_unwrap_model,
 )
 from train_eval import (
     evaluate, _compute_null_counts, _null_metrics_from_counts,
@@ -466,7 +467,7 @@ def train():
             if accelerator.is_main_process:
                 save_dir = f"checkpoints/best_model"
                 os.makedirs(save_dir, exist_ok=True)
-                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model = safe_unwrap_model(model)
 
                 trainable_state_dict = unwrapped_model.get_trainable_state_dict()
 

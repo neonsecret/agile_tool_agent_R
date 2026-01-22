@@ -289,6 +289,13 @@ def build_scheduler(optimizer, training_cfg, total_training_steps):
     return _build_clamped_cosine_scheduler(optimizer, training_cfg, total_training_steps)
 
 
+def safe_unwrap_model(model):
+    """Avoid accelerate.unwrap_model to prevent optional deepspeed import side effects."""
+    if hasattr(model, "module"):
+        return model.module
+    return model
+
+
 def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
     import os
     if not os.path.exists(checkpoint_path):
@@ -297,7 +304,7 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
     accelerator.print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=accelerator.device)
 
-    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model = safe_unwrap_model(model)
     checkpoint_state = checkpoint['model_state_dict']
     
     if hasattr(unwrapped_model, 'load_trainable_state_dict'):

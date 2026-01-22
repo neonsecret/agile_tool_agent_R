@@ -16,7 +16,7 @@ triton>=2.0.0  # CUDA kernel compilation (required by flash-attn)
 unsloth  # Faster training/inference
 xformers  # Memory-efficient attention (alternative to flash-attn)
 deepspeed  # Distributed training
-
+setuptools
 # Optional (cross-platform)
 optimum  # BetterTransformer (may conflict with quantization)
 

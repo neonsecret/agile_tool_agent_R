@@ -78,7 +78,7 @@ Key settings for 4x RTX 4090 (or 5x RTX 4000 Ada):
 ```bash
 # Option 1: Using UV (no activation needed)
 uv run wandb login
-uv run huggingface-cli login
+uv run hf auth login
 uv run python train.py
 
 # Option 2: Using activated environment

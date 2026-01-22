@@ -10,6 +10,7 @@ from typing import Dict
 from accelerate import Accelerator
 
 from data.device_utils import empty_cache
+from train_utils import safe_unwrap_model
 
 
 def s3_denoise(model, hidden_states, labels, scaffold_mask, num_steps=4):
@@ -88,7 +89,7 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
     total_token_accuracy = 0
     total_tokens = 0
 
-    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model = safe_unwrap_model(model)
     diffusion_num_steps = unwrapped_model.diffusion_head.num_steps
 
     with torch.no_grad():

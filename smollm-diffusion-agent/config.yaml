@@ -72,7 +72,7 @@ training:
   resume_from_checkpoint: false
   checkpoint_path: "checkpoints/best_model/model.pt"
   eval_num_samples: 10  # Number of samples to evaluate on
-  warmup_steps: 300  # Short warmup; gradient_accum makes batch-step progress faster than optimizer steps
+  warmup_steps: 200  # Short warmup; gradient_accum makes batch-step progress faster than optimizer steps
   min_lr_ratio: 0.01  # Minimum LR as fraction of peak (0.01 = 1% of learning_rate, e.g., 1.2e-6)
   ddp_find_unused_parameters: false
   compile:
