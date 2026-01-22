@@ -42,7 +42,7 @@ training:
   batch_size: 4
   learning_rate: 1.2e-4  # Slightly increased for larger effective batch (384 vs previous 32-48)
   optimizer:
-    name: "adamw"
+    name: "muon"
     muon:
       lr: 1.2e-4
       momentum: 0.95
@@ -71,11 +71,10 @@ training:
   logits_for_metrics: true
   resume_from_checkpoint: false
   checkpoint_path: "checkpoints/best_model/model.pt"
-  eval_every_n_steps: 1000  # Run functional evaluation every N steps
   eval_num_samples: 10  # Number of samples to evaluate on
   warmup_steps: 300  # Short warmup; gradient_accum makes batch-step progress faster than optimizer steps
   min_lr_ratio: 0.01  # Minimum LR as fraction of peak (0.01 = 1% of learning_rate, e.g., 1.2e-6)
-  ddp_find_unused_parameters: true
+  ddp_find_unused_parameters: false
   compile:
     enabled: false          # Enable torch.compile for training (CUDA only, auto-disabled on MPS/CPU)
     mode: "reduce-overhead" # Compilation mode: default, reduce-overhead, or max-autotune

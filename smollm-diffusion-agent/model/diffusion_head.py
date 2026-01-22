@@ -140,6 +140,18 @@ class SchemaDiffusionHead(nn.Module):
         mask_positions = scaffold_mask & mask_probs.bool()
         noisy_tokens[mask_positions] = self.mask_token_id
 
+        # Ensure at least one masked position per sample when scaffold positions exist
+        if scaffold_mask.any():
+            mask_counts = mask_positions.sum(dim=1)
+            scaffold_any = scaffold_mask.any(dim=1)
+            needs_mask = (mask_counts == 0) & scaffold_any
+            if needs_mask.any():
+                rand = torch.rand_like(tokens.float())
+                rand = rand.masked_fill(~scaffold_mask, -1.0)
+                choice_idx = rand.argmax(dim=1)
+                noisy_tokens[needs_mask, choice_idx[needs_mask]] = self.mask_token_id
+                mask_positions[needs_mask, choice_idx[needs_mask]] = True
+
         return noisy_tokens, mask_positions
 
     def predict(self, hidden_states, current_tokens, t, attention_mask=None):

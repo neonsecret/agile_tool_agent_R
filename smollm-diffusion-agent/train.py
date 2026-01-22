@@ -278,6 +278,8 @@ def train():
             disable=not accelerator.is_local_main_process
         )
 
+        eval_stride = max(1, num_update_steps_per_epoch // 5)
+        update_step_in_epoch = 0
         for batch in progress_bar:
             did_step = False
             # Mark CUDA graph step boundary to prevent tensor reuse issues (torch.compile feature)
@@ -341,6 +343,9 @@ def train():
                         with torch.no_grad():
                             predictions = outputs["predictions"]
                             mask_positions = outputs.get("mask_positions", batch["scaffold_mask"])
+                            mask_counts = mask_positions.sum(dim=1).float()
+                            zero_masks = (mask_counts == 0).sum()
+                            total_samples = torch.tensor(mask_counts.numel(), device=mask_counts.device)
                             counts = _compute_null_counts(
                                 predictions,
                                 batch["labels"],
@@ -358,6 +363,16 @@ def train():
                                 null_metrics = _null_metrics_from_counts(counts)
                                 for key, value in null_metrics.items():
                                     logs[f"train/{key}"] = value
+                            if mask_positions.numel() > 0:
+                                total_samples = _sum_across_processes(total_samples, accelerator)
+                                zero_masks = _sum_across_processes(zero_masks, accelerator)
+                                mask_sum = _sum_across_processes(mask_counts.sum(), accelerator)
+                                logs["train/zero_mask_sample_rate"] = (
+                                    zero_masks.float() / total_samples.float()
+                                ).item()
+                                logs["train/avg_masked_positions"] = (
+                                    mask_sum.float() / total_samples.float()
+                                ).item()
 
                     if grad_norm is not None:
                         try:
@@ -376,15 +391,18 @@ def train():
                         accelerator.log(lr_logs, step=global_step)
 
             if did_step:
+                update_step_in_epoch += 1
                 # Step-based functional evaluation
-                eval_every_n_steps = training_cfg.get("eval_every_n_steps", 1000)
                 eval_num_samples = training_cfg.get("eval_num_samples", 10)
 
-                if global_step % eval_every_n_steps == 0:
+                if update_step_in_epoch % eval_stride == 0:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         accelerator.print(f"\n{'=' * 80}")
-                        accelerator.print(f"Running functional evaluation at step {global_step}")
+                        accelerator.print(
+                            f"Running functional evaluation at step {global_step} "
+                            f"(epoch_step {update_step_in_epoch}/{num_update_steps_per_epoch})"
+                        )
                         accelerator.print(f"{'=' * 80}")
 
                         functional_metrics = functional_evaluation(
