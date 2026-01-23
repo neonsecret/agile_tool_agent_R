@@ -80,3 +80,33 @@ def extract_tool_call_from_message(msg_value: str) -> Optional[Dict[str, Any]]:
         return None
 
     return tool_call_json
+
+
+def get_tool_schema_properties(tool_schema: Dict[str, Any]) -> Dict[str, Any]:
+    params = tool_schema.get("parameters", {})
+    if isinstance(params, dict) and "properties" in params:
+        return params["properties"]
+    if isinstance(params, dict):
+        return params
+    return {}
+
+
+def normalize_tool_args(tool_args: Any, tool_schema: Dict[str, Any]) -> Dict[str, Any]:
+    if tool_args is None:
+        tool_args = {}
+    if isinstance(tool_args, str):
+        try:
+            tool_args = json.loads(tool_args)
+        except json.JSONDecodeError:
+            tool_args = {}
+    if not isinstance(tool_args, dict):
+        tool_args = {}
+
+    props = get_tool_schema_properties(tool_schema)
+    normalized = {}
+    for key in props.keys():
+        if key in tool_args:
+            normalized[key] = tool_args.get(key)
+        else:
+            normalized[key] = None
+    return normalized

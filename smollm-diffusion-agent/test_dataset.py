@@ -354,7 +354,14 @@ def debug_model_input_output(dataset, tokenizer, mask_token_id, model, num_examp
                 print(f"     Noisy tokens at masked positions (first 10): {noisy_at_masks[:10].tolist()}")
                 print(f"     All are mask_token_id? {torch.all(noisy_at_masks == mask_token_id)}")
 
-            logits = diffusion_head.predict(hidden_states, noisy_tokens, t)
+            prompt_mask = ~scaffold_mask
+            logits = diffusion_head.predict(
+                hidden_states,
+                noisy_tokens,
+                t,
+                scaffold_mask=scaffold_mask,
+                prompt_mask=prompt_mask,
+            )
 
             print(f"   Prediction logits shape: {logits.shape}")
 

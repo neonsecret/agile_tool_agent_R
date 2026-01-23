@@ -117,8 +117,8 @@ def build_schema_template(
     _encode_append(tokenizer, tokens, text_parts, "{\n")
 
     for index, (field, budget) in enumerate(fields):
-        prefix = f'{indent}"{field}": "'
-        suffix = '"' + (",\n" if index < len(fields) - 1 else "\n")
+        prefix = f'{indent}"{field}": '
+        suffix = ",\n" if index < len(fields) - 1 else "\n"
 
         _encode_append(tokenizer, tokens, text_parts, prefix)
 

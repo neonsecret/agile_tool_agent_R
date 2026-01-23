@@ -28,13 +28,21 @@ class CUDAGraphRunner:
         return self._cuda_graph_enabled
 
     def setup(self, hidden_states: torch.Tensor,
-              current_tokens: torch.Tensor, t: torch.Tensor):
+              current_tokens: torch.Tensor, t: torch.Tensor,
+              scaffold_mask: Optional[torch.Tensor] = None,
+              prompt_mask: Optional[torch.Tensor] = None):
         """Capture CUDA graph for diffusion head forward pass."""
         if not self._cuda_graph_enabled:
             return
 
         for _ in range(3):
-            _ = self.model.diffusion_head.predict(hidden_states, current_tokens, t)
+            _ = self.model.diffusion_head.predict(
+                hidden_states,
+                current_tokens,
+                t,
+                scaffold_mask=scaffold_mask,
+                prompt_mask=prompt_mask,
+            )
 
         synchronize(self.device)
 
@@ -43,22 +51,30 @@ class CUDAGraphRunner:
             'current_tokens': current_tokens.clone(),
             't': t.clone()
         }
+        if scaffold_mask is not None:
+            self._graph_inputs['scaffold_mask'] = scaffold_mask.clone()
+        if prompt_mask is not None:
+            self._graph_inputs['prompt_mask'] = prompt_mask.clone()
 
         self._cuda_graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._cuda_graph):
             self._graph_outputs = self.model.diffusion_head.predict(
                 self._graph_inputs['hidden_states'],
                 self._graph_inputs['current_tokens'],
-                self._graph_inputs['t']
+                self._graph_inputs['t'],
+                scaffold_mask=self._graph_inputs.get('scaffold_mask'),
+                prompt_mask=self._graph_inputs.get('prompt_mask'),
             )
 
         print("CUDA graph captured for diffusion head")
 
     def run(self, hidden_states: torch.Tensor,
-            current_tokens: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+            current_tokens: torch.Tensor, t: torch.Tensor,
+            scaffold_mask: Optional[torch.Tensor] = None,
+            prompt_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Execute captured CUDA graph with new inputs."""
         if self._cuda_graph is None:
-            self.setup(hidden_states, current_tokens, t)
+            self.setup(hidden_states, current_tokens, t, scaffold_mask, prompt_mask)
 
         if self._cuda_graph is not None:
             if (hidden_states.shape == self._graph_inputs['hidden_states'].shape and
@@ -66,14 +82,30 @@ class CUDAGraphRunner:
                 self._graph_inputs['hidden_states'].copy_(hidden_states)
                 self._graph_inputs['current_tokens'].copy_(current_tokens)
                 self._graph_inputs['t'].copy_(t)
+                if scaffold_mask is not None and 'scaffold_mask' in self._graph_inputs:
+                    self._graph_inputs['scaffold_mask'].copy_(scaffold_mask)
+                if prompt_mask is not None and 'prompt_mask' in self._graph_inputs:
+                    self._graph_inputs['prompt_mask'].copy_(prompt_mask)
 
                 self._cuda_graph.replay()
 
                 return self._graph_outputs.clone()
             else:
-                return self.model.diffusion_head.predict(hidden_states, current_tokens, t)
+                return self.model.diffusion_head.predict(
+                    hidden_states,
+                    current_tokens,
+                    t,
+                    scaffold_mask=scaffold_mask,
+                    prompt_mask=prompt_mask,
+                )
         else:
-            return self.model.diffusion_head.predict(hidden_states, current_tokens, t)
+            return self.model.diffusion_head.predict(
+                hidden_states,
+                current_tokens,
+                t,
+                scaffold_mask=scaffold_mask,
+                prompt_mask=prompt_mask,
+            )
 
     def clear(self):
         """Clear CUDA graph state."""

@@ -67,9 +67,6 @@ class GenerationOperations:
         prompt_ids = torch.tensor(prompt_ids_list, dtype=torch.long, device=self.device).unsqueeze(0)
         prompt_len = prompt_ids.shape[1]
 
-        if self.model.use_unsloth:
-            raise NotImplementedError("Unsloth inference is not implemented for base generation.")
-
         output_ids = self.model.base_llm.generate(
             prompt_ids,
             max_new_tokens=max_new_tokens,

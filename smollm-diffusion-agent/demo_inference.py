@@ -34,6 +34,7 @@ def demo_inference():
     steps = inference_cfg.get("steps", 4)
     temperature = inference_cfg.get("temperature", 0.0)
     cfg_scale = inference_cfg.get("cfg_scale", 0.0)
+    reencode_every = inference_cfg.get("reencode_hidden_states_every", 0)
     max_seq_length = inference_kwargs.get("max_seq_len", 2048)
     use_torch_compile = inference_kwargs["use_torch_compile"]
     use_cuda_graph = inference_kwargs["use_cuda_graph"]
@@ -167,7 +168,8 @@ def demo_inference():
         temperature=temperature,
         cfg_scale=cfg_scale,
         show_steps=True,
-        use_cuda_graph=use_cuda_graph
+        use_cuda_graph=use_cuda_graph,
+        reencode_hidden_states_every=reencode_every,
     )
 
     print("\n" + "=" * 80)
@@ -179,7 +181,8 @@ def demo_inference():
         tool_schema,
         tokenizer,
         min_budget=min_field_budget,
-        max_budget=max_field_budget
+        max_budget=max_field_budget,
+        extra_budget=extra_field_budget,
     )
 
     print("\nAutomatic budget calculation:")

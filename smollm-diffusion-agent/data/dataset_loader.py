@@ -16,9 +16,10 @@ from .utils import resolve_mask_token, resolve_null_token
 from .multi_dataset_loader import load_multi_dataset_from_config
 from .dataset_processing import (
     parse_tools_schema,
-    map_role,
     build_messages,
     extract_tool_call_from_message,
+    normalize_tool_args,
+    get_tool_schema_properties,
 )
 
 # Budget configuration - matches guide.md recommendations
@@ -204,6 +205,8 @@ class SmartScaffoldDataset(Dataset):
         if not tool_schema:
             return
 
+        tool_args = normalize_tool_args(tool_args, tool_schema)
+
         messages = build_messages(
             conversations, msg_idx, self.system_message, self.max_history_messages
         )
@@ -212,18 +215,13 @@ class SmartScaffoldDataset(Dataset):
         fields = []
         target_tokens_map = {}
 
-        params = tool_schema.get("parameters", {})
-        if "properties" in params:
-            props = params["properties"]
-        else:
-            props = params
+        props = get_tool_schema_properties(tool_schema)
 
         for key in props.keys():
-            val = tool_args.get(key, "")
-            if not isinstance(val, str):
-                val = json.dumps(val)
+            val = tool_args.get(key, None)
+            val_json = json.dumps(val)
 
-            val_ids = self.tokenizer.encode(val, add_special_tokens=False)
+            val_ids = self.tokenizer.encode(val_json, add_special_tokens=False)
             # EOS tokens are structural - Python/template handles them, not the model
             # This aligns with schema scaffolding: Python does syntax, LLM does semantics
 

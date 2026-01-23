@@ -51,6 +51,7 @@ class GenerationConfig:
     enable_remasking: bool = True
     remask_ratio: float = 0.2  # Fraction of low-confidence tokens to remask
     min_lock_confidence: float = 0.7  # Min confidence to keep token locked
+    reencode_hidden_states_every: int = 0  # 0 = never, 1 = every step, etc.
 
 
 @dataclass
@@ -442,6 +443,8 @@ class FunctionCallGenerator:
             hidden_states_cached = self.diffusion_ops._cache_hidden_states(
                 sequence, scaffold_mask, template.mask_token_id,
             )
+            reencode_every = max(0, int(cfg.reencode_hidden_states_every))
+            prompt_mask = ~scaffold_mask
 
             for step in trange(cfg.steps, desc="Diffusion steps", disable=not cfg.show_steps):
                 mask_positions.fill_(False)
@@ -462,9 +465,14 @@ class FunctionCallGenerator:
                     dtype=torch.float,
                 )
 
+                if reencode_every > 0 and step % reencode_every == 0:
+                    hidden_states_cached = self.diffusion_ops._compute_hidden_states(sequence)
+
                 logits = self.diffusion_ops._predict_from_cached_hidden_states(
                     hidden_states_cached, sequence, t,
-                    cfg.use_cuda_graph, self.cuda_graph_runner
+                    cfg.use_cuda_graph, self.cuda_graph_runner,
+                    scaffold_mask=scaffold_mask,
+                    prompt_mask=prompt_mask,
                 )
 
                 if cfg.show_steps and step == 0:

@@ -7,8 +7,16 @@ It's useful for testing and debugging before running on the full benchmark.
 
 import json
 from pathlib import Path
-from evaluate_bfcl import BFCLEvaluator
-from models import load_diffusion_llm
+from transformers import AutoTokenizer
+
+from evaluate_bfcl import (
+    BFCLEvaluator,
+    _build_generator,
+    _build_model,
+    _load_config,
+)
+from data.config_utils import validate_and_adjust_config
+from data.device_utils import get_device
 
 
 def main():
@@ -30,20 +38,28 @@ def main():
     print(f"Output will be saved to: {output_path}")
     print()
 
-    # Load model
+    # Load model + generator
     print("Loading diffusion LLM model...")
     print("(This may take a moment...)")
-    model, tokenizer, device = load_diffusion_llm()
+    config = _load_config()
+    device = get_device()
+    config = validate_and_adjust_config(config, device)
+    tokenizer = AutoTokenizer.from_pretrained(
+        config.get("model", {}).get("base_model_id", "HuggingFaceTB/SmolLM3-3B")
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = _build_model(config, tokenizer, device)
+    generator, gen_config = _build_generator(config, tokenizer, device, model)
     print(f"Model loaded on device: {device}")
     print()
 
     # Create evaluator
     print("Creating BFCL evaluator...")
     evaluator = BFCLEvaluator(
-        model=model,
-        tokenizer=tokenizer,
-        device=device,
-        generation_steps=16  # Using 16 steps as in test_function_calling()
+        generator=generator,
+        gen_config=gen_config,
     )
     print()
 
@@ -81,21 +97,13 @@ def main():
 
         print(f"\nExample {result['id']}:")
         print(f"Query: {result['query']}")
-        print(f"Predicted: {result['prediction'].get('function_name', 'N/A')}")
+        print(f"Predicted: {result['prediction'].get('name', 'N/A')}")
         print(f"Ground Truth: {result['ground_truth'].get('name', 'N/A')}")
         print(f"Correct: {'✓' if result['correct'] else '✗'}")
 
         # Show arguments if correct
         if result['correct']:
-            pred_args = {}
-            i = 1
-            while f"arg_{i}_name" in result['prediction']:
-                arg_name = result['prediction'].get(f"arg_{i}_name", "")
-                arg_value = result['prediction'].get(f"arg_{i}_value", "")
-                if arg_name and arg_value:
-                    pred_args[arg_name] = arg_value
-                i += 1
-
+            pred_args = result['prediction'].get("arguments", {})
             if pred_args:
                 print(f"Arguments: {pred_args}")
 

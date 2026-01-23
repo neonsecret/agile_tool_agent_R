@@ -32,12 +32,36 @@ def _create_sinusoidal_positions(max_len, dim):
     return pe
 
 
+class PromptCrossAttention(nn.Module):
+    def __init__(self, hidden_dim, num_heads):
+        super().__init__()
+        self.cross_attn = nn.MultiheadAttention(
+            hidden_dim,
+            num_heads=num_heads,
+            batch_first=True,
+        )
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x, prompt_states, prompt_mask=None):
+        key_padding_mask = None
+        if prompt_mask is not None:
+            key_padding_mask = ~prompt_mask
+        attn_out, _ = self.cross_attn(
+            x, prompt_states, prompt_states,
+            key_padding_mask=key_padding_mask,
+        )
+        return self.norm(x + attn_out)
+
+
 class SchemaDiffusionHead(nn.Module):
     def __init__(self, input_dim, vocab_size, hidden_dim=1024, num_layers=2, num_steps=4,
                  label_smoothing=0.1, use_bidirectional=True, num_heads=8,
                  null_loss_weight=0.3, null_prediction_penalty=0.0, entropy_weight=0.05,
                  use_optimized_attention=True, training_temperature=1.0,
-                 repetition_penalty=0.0, max_seq_len=2048, use_attention_mask=False):
+                 repetition_penalty=0.0, max_seq_len=2048, use_attention_mask=False,
+                 t_sampling="uniform", t_high_prob=0.0, t_high_range=None,
+                 use_prompt_cross_attention=False, prompt_cross_attention_heads=None,
+                 use_field_position=False, field_position_max_len=64):
         """
         Args:
             input_dim: Dimension of hidden states from base model
@@ -67,6 +91,23 @@ class SchemaDiffusionHead(nn.Module):
         self.training_temperature = training_temperature
         self.repetition_penalty = repetition_penalty
         self.use_attention_mask = use_attention_mask
+        self.t_sampling = t_sampling
+        self.t_high_prob = t_high_prob
+        self.use_prompt_cross_attention = use_prompt_cross_attention
+        self.use_field_position = use_field_position
+        self.field_position_max_len = field_position_max_len
+
+        if t_high_range is None:
+            t_high_range = (0.8, 1.0)
+        if isinstance(t_high_range, (list, tuple)) and len(t_high_range) == 2:
+            high_min = float(t_high_range[0])
+            high_max = float(t_high_range[1])
+        else:
+            high_min, high_max = 0.8, 1.0
+        high_min = max(0.0, min(1.0, high_min))
+        high_max = max(high_min, min(1.0, high_max))
+        self.t_high_min = high_min
+        self.t_high_max = high_max
 
         self.noise = LogLinearNoise()
 
@@ -99,6 +140,16 @@ class SchemaDiffusionHead(nn.Module):
             ])
 
         self.output_proj = nn.Linear(hidden_dim, vocab_size)
+        if self.use_prompt_cross_attention:
+            if prompt_cross_attention_heads is None:
+                prompt_cross_attention_heads = num_heads
+            self.prompt_cross_attn = PromptCrossAttention(hidden_dim, prompt_cross_attention_heads)
+        else:
+            self.prompt_cross_attn = None
+        if self.use_field_position:
+            self.field_position_emb = nn.Embedding(field_position_max_len, hidden_dim)
+        else:
+            self.field_position_emb = None
         self.mask_token_id = None
         self.null_token_id = None
 
@@ -109,6 +160,47 @@ class SchemaDiffusionHead(nn.Module):
     def set_null_token_id(self, null_token_id):
         """Set the NULL token ID for self-adaptive masking."""
         self.null_token_id = null_token_id
+
+    def sample_timesteps(self, batch_size, device):
+        """Sample timesteps t in [0, 1] using configured strategy."""
+        if self.t_sampling == "sqrt":
+            return torch.rand(batch_size, device=device) ** 0.5
+        if self.t_sampling == "mixture_high":
+            t = torch.rand(batch_size, device=device)
+            if self.t_high_prob > 0:
+                high_mask = torch.rand(batch_size, device=device) < self.t_high_prob
+                if high_mask.any():
+                    high_samples = torch.rand(int(high_mask.sum().item()), device=device)
+                    t[high_mask] = (
+                        high_samples * (self.t_high_max - self.t_high_min) + self.t_high_min
+                    )
+            return t
+        return torch.rand(batch_size, device=device)
+
+    def _compute_field_positions(self, scaffold_mask: torch.Tensor) -> torch.Tensor:
+        positions = torch.full_like(scaffold_mask, -1, dtype=torch.long)
+        for batch_idx in range(scaffold_mask.size(0)):
+            idxs = torch.nonzero(scaffold_mask[batch_idx], as_tuple=False).squeeze(-1)
+            if idxs.numel() == 0:
+                continue
+            start = idxs[0].item()
+            rel = 0
+            for pos in idxs.tolist():
+                if pos != start + rel:
+                    start = pos
+                    rel = 0
+                positions[batch_idx, pos] = rel
+                rel += 1
+        return positions
+
+    def _add_field_position_embeddings(self, x: torch.Tensor, scaffold_mask: torch.Tensor) -> torch.Tensor:
+        if self.field_position_emb is None or scaffold_mask is None:
+            return x
+        positions = self._compute_field_positions(scaffold_mask)
+        positions = positions.clamp(min=0, max=self.field_position_max_len - 1)
+        field_emb = self.field_position_emb(positions)
+        field_emb = field_emb * scaffold_mask.unsqueeze(-1).to(field_emb.dtype)
+        return x + field_emb
 
     def forward_diffusion(self, tokens, scaffold_mask, t):
         """
@@ -154,7 +246,8 @@ class SchemaDiffusionHead(nn.Module):
 
         return noisy_tokens, mask_positions
 
-    def predict(self, hidden_states, current_tokens, t, attention_mask=None):
+    def predict(self, hidden_states, current_tokens, t, attention_mask=None,
+                scaffold_mask=None, prompt_hidden_states=None, prompt_mask=None):
         """
         Predict original tokens from noisy version.
         
@@ -172,41 +265,20 @@ class SchemaDiffusionHead(nn.Module):
         Returns:
             logits: [batch, seq_len, vocab_size] predictions
         """
-        batch_size, seq_len = hidden_states.shape[:2]
-
-        context = self.input_proj(hidden_states)
-        safe_tokens = current_tokens.clone()
-        safe_tokens[safe_tokens < 0] = 0
-        token_emb = self.token_emb(safe_tokens)
-
-        # Convert timestep to tensor if needed (keep as continuous float)
-        if isinstance(t, (int, float)):
-            t_tensor = torch.full((batch_size,), t, device=hidden_states.device, dtype=torch.float)
-        else:
-            t_tensor = t.float()
-
-        # Convert continuous t ∈ [0, 1] to discrete timestep indices for embedding lookup
-        # Scale t to [0, num_steps] range and clamp
-        t_indices = (t_tensor * self.num_steps).long().clamp(0, self.num_steps)
-
-        t_emb = self.time_embed(t_indices).unsqueeze(1)
-
-        # Add sinusoidal position embeddings for length-aware predictions
-        pos_emb = self.position_embeddings[:seq_len].unsqueeze(0).to(hidden_states.dtype)
-
-        x = context + token_emb + t_emb + pos_emb
-
-        if self.use_bidirectional:
-            for block in self.denoise_blocks:
-                x = block(x, attention_mask=attention_mask)
-        else:
-            for block in self.denoise_blocks:
-                x = x + block(x)
-
+        x = self._compute_hidden(
+            hidden_states,
+            current_tokens,
+            t,
+            attention_mask=attention_mask,
+            scaffold_mask=scaffold_mask,
+            prompt_hidden_states=prompt_hidden_states,
+            prompt_mask=prompt_mask,
+        )
         logits = self.output_proj(x)
         return logits
 
-    def _compute_hidden(self, hidden_states, current_tokens, t, attention_mask=None):
+    def _compute_hidden(self, hidden_states, current_tokens, t, attention_mask=None,
+                        scaffold_mask=None, prompt_hidden_states=None, prompt_mask=None):
         """Compute hidden representations without output projection (memory efficient)."""
         batch_size, seq_len = hidden_states.shape[:2]
 
@@ -225,6 +297,15 @@ class SchemaDiffusionHead(nn.Module):
         pos_emb = self.position_embeddings[:seq_len].unsqueeze(0).to(hidden_states.dtype)
 
         x = context + token_emb + t_emb + pos_emb
+        x = self._add_field_position_embeddings(x, scaffold_mask)
+        if self.prompt_cross_attn is not None:
+            if prompt_hidden_states is None:
+                prompt_hidden_states = hidden_states
+            if prompt_hidden_states is hidden_states:
+                prompt_context = context
+            else:
+                prompt_context = self.input_proj(prompt_hidden_states)
+            x = self.prompt_cross_attn(x, prompt_context, prompt_mask=prompt_mask)
 
         if self.use_bidirectional:
             for block in self.denoise_blocks:
@@ -235,7 +316,9 @@ class SchemaDiffusionHead(nn.Module):
 
         return x
 
-    def training_step(self, tokens, hidden_states, scaffold_mask, attention_mask=None):
+    def training_step(self, tokens, hidden_states, scaffold_mask, attention_mask=None,
+                      current_tokens=None, mask_positions=None, t=None,
+                      prompt_hidden_states=None, prompt_mask=None):
         """
         Full training forward pass with diffusion loss.
 
@@ -258,11 +341,18 @@ class SchemaDiffusionHead(nn.Module):
         if valid_scaffold_mask.sum() == 0:
             return torch.tensor(0.0, device=tokens.device, requires_grad=True)
 
-        t = torch.rand(batch_size, device=tokens.device)
+        if t is None:
+            t = self.sample_timesteps(batch_size, tokens.device)
 
-        noisy_tokens, mask_positions = self.forward_diffusion(
-            tokens, scaffold_mask, t
-        )
+        noisy_tokens = None
+        if current_tokens is None or mask_positions is None:
+            noisy_tokens, mask_positions = self.forward_diffusion(
+                tokens, scaffold_mask, t
+            )
+            if current_tokens is None:
+                current_tokens = noisy_tokens
+        if mask_positions is None:
+            mask_positions = (current_tokens == self.mask_token_id) & scaffold_mask
 
         valid_mask_positions = mask_positions & valid_labels
 
@@ -270,7 +360,15 @@ class SchemaDiffusionHead(nn.Module):
             return torch.tensor(0.0, device=tokens.device, requires_grad=True)
 
         # Memory optimization: compute hidden states, then output_proj only on masked positions
-        x = self._compute_hidden(hidden_states, noisy_tokens, t, attention_mask=attention_mask)
+        x = self._compute_hidden(
+            hidden_states,
+            current_tokens,
+            t,
+            attention_mask=attention_mask,
+            scaffold_mask=scaffold_mask,
+            prompt_hidden_states=prompt_hidden_states,
+            prompt_mask=prompt_mask,
+        )
         active_hidden = x[valid_mask_positions]
         active_logits = self.output_proj(active_hidden)
         active_labels = tokens[valid_mask_positions]
@@ -279,7 +377,9 @@ class SchemaDiffusionHead(nn.Module):
 
         return loss
 
-    def training_step_with_outputs(self, tokens, hidden_states, scaffold_mask, attention_mask=None):
+    def training_step_with_outputs(self, tokens, hidden_states, scaffold_mask, attention_mask=None,
+                                   current_tokens=None, mask_positions=None, t=None,
+                                   prompt_hidden_states=None, prompt_mask=None):
         """Training step that also returns predictions for metrics."""
         batch_size = tokens.shape[0]
 
@@ -296,11 +396,18 @@ class SchemaDiffusionHead(nn.Module):
                 "t": None,
             }
 
-        t = torch.rand(batch_size, device=tokens.device)
+        if t is None:
+            t = self.sample_timesteps(batch_size, tokens.device)
 
-        noisy_tokens, mask_positions = self.forward_diffusion(
-            tokens, scaffold_mask, t
-        )
+        noisy_tokens = None
+        if current_tokens is None or mask_positions is None:
+            noisy_tokens, mask_positions = self.forward_diffusion(
+                tokens, scaffold_mask, t
+            )
+            if current_tokens is None:
+                current_tokens = noisy_tokens
+        if mask_positions is None:
+            mask_positions = (current_tokens == self.mask_token_id) & scaffold_mask
 
         valid_mask_positions = mask_positions & valid_labels
         if valid_mask_positions.sum() == 0:
@@ -314,7 +421,15 @@ class SchemaDiffusionHead(nn.Module):
             }
 
         # Compute loss efficiently (only output_proj on masked positions)
-        x = self._compute_hidden(hidden_states, noisy_tokens, t, attention_mask=attention_mask)
+        x = self._compute_hidden(
+            hidden_states,
+            current_tokens,
+            t,
+            attention_mask=attention_mask,
+            scaffold_mask=scaffold_mask,
+            prompt_hidden_states=prompt_hidden_states,
+            prompt_mask=prompt_mask,
+        )
         active_hidden = x[valid_mask_positions]
         active_logits = self.output_proj(active_hidden)
         active_labels = tokens[valid_mask_positions]
@@ -327,7 +442,7 @@ class SchemaDiffusionHead(nn.Module):
             "loss": loss,
             "predictions": predictions,
             "mask_positions": mask_positions,
-            "noisy_tokens": noisy_tokens,
+            "noisy_tokens": noisy_tokens if noisy_tokens is not None else current_tokens,
             "t": t,
         }
 

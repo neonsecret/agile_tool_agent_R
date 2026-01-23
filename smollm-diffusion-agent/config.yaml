@@ -28,11 +28,19 @@ diffusion:
   use_bidirectional: true  # Use bidirectional attention for global constraint verification
   use_optimized_attention: true  # Use SDPA-optimized attention (2-3x faster, FlashAttention on CUDA)
   use_attention_mask: false  # Avoids padding attention during training
-  null_loss_weight: 0.1  # Down-weight NULL labels to avoid NULL-dominant solutions
+  init_vocab_from_base: true  # Initialize token_emb/output_proj from base model (trainable)
+  null_loss_weight: 0.15  # Down-weight NULL labels to avoid NULL-dominant solutions
   null_prediction_penalty: 0.3  # Penalize NULL predictions on non-NULL labels
-  entropy_weight: 0.025  # Reduced from 0.07: high entropy causes random garbage, lower value stabilizes
-  training_temperature: 1.2  # Reduced from 1.5: less smoothing to reduce low-confidence token spam
+  entropy_weight: 0.08  # Higher entropy to reduce collapse
+  training_temperature: 1.0  # No temperature smoothing during training
   repetition_penalty: 0.0  # Disabled by default (masked positions are non-contiguous)
+  t_sampling: "mixture_high"  # uniform | sqrt | mixture_high
+  t_high_prob: 0.3
+  t_high_range: [0.8, 1.0]
+  use_prompt_cross_attention: true
+  prompt_cross_attention_heads: null
+  use_field_position: true
+  field_position_max_len: 32
 
 # Training Configuration
 # Optimized for 4x RTX 4090 (24GB each) with 4-bit quantization
@@ -88,6 +96,7 @@ inference:
   steps: 4                 # Number of diffusion denoising steps
   temperature: 0.0         # Sampling temperature (0.0 = greedy)
   max_seq_len: 2048        # Maximum sequence length for inference
+  reencode_hidden_states_every: 0  # 0 = never, 1 = every step, 2 = every 2 steps, etc.
   # Running Confidence Remasking (RCR) - allows token revision during inference
   remasking:
     enabled: true          # Enable RCR to fix over-denoising and allow token revision
@@ -114,6 +123,14 @@ data:
     - name: "Salesforce/xlam-function-calling-60k"
       split: "train"
       weight: 1.0  # Use full dataset
+      limit: null
+    - name: "glaiveai/glaive-function-calling-v2"
+      split: "train"
+      weight: 0.5
+      limit: 50000
+    - name: "Salesforce/APIGen-MT-5k"
+      split: "train"
+      weight: 1.0
       limit: null
   
   limit: null # Global limit (overrides individual dataset limits if set)

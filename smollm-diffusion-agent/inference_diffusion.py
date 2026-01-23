@@ -127,6 +127,18 @@ class DiffusionOperations:
         del outputs, attention_mask, masked_sequence
         return hidden_states_cached
 
+    def _compute_hidden_states(self, sequence: torch.Tensor) -> torch.Tensor:
+        attention_mask = torch.ones_like(sequence)
+        outputs = self.model.get_hidden_states(
+            input_ids=sequence,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            use_cache=False,
+        )
+        hidden_states = outputs.hidden_states[-1].detach()
+        del outputs, attention_mask
+        return hidden_states
+
     def _predict_from_cached_hidden_states(
             self,
             hidden_states: torch.Tensor,
@@ -134,6 +146,8 @@ class DiffusionOperations:
             t: torch.Tensor,
             use_cuda_graph: bool,
             cuda_graph_runner,
+            scaffold_mask: Optional[torch.Tensor] = None,
+            prompt_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Predict logits using cached base hidden states.
@@ -145,9 +159,21 @@ class DiffusionOperations:
         hidden_states = hidden_states.to(dtype=diffusion_head_dtype)
 
         if use_cuda_graph and cuda_graph_runner.is_enabled():
-            logits = cuda_graph_runner.run(hidden_states, current_tokens, t)
+            logits = cuda_graph_runner.run(
+                hidden_states,
+                current_tokens,
+                t,
+                scaffold_mask=scaffold_mask,
+                prompt_mask=prompt_mask,
+            )
         else:
-            logits = self.model.diffusion_head.predict(hidden_states, current_tokens, t)
+            logits = self.model.diffusion_head.predict(
+                hidden_states,
+                current_tokens,
+                t,
+                scaffold_mask=scaffold_mask,
+                prompt_mask=prompt_mask,
+            )
 
         return logits
 

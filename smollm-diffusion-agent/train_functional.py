@@ -13,12 +13,12 @@ from data.device_utils import empty_cache
 from train_utils import safe_unwrap_model
 
 
-def s3_denoise(model, hidden_states, labels, scaffold_mask, num_steps=4):
+def s3_denoise(model, hidden_states, input_ids, labels, scaffold_mask, num_steps=4):
     """
     S3-style top-K confidence denoising (matches inference.py strategy).
 
     This uses the ACTUAL inference strategy:
-    - Fixed t=0 (fully denoised state)
+    - Timestep based on remaining masks
     - Top-K confidence-based token selection
     - Iterative refinement over multiple steps
     """
@@ -28,13 +28,13 @@ def s3_denoise(model, hidden_states, labels, scaffold_mask, num_steps=4):
     diffusion_head_dtype = next(model.diffusion_head.parameters()).dtype
     hidden_states = hidden_states.to(dtype=diffusion_head_dtype)
 
-    current_tokens = labels.clone()
+    current_tokens = input_ids.clone()
     current_tokens[scaffold_mask] = mask_token_id
 
     total_masks = scaffold_mask.sum().item()
     budget = max(1, int(total_masks / num_steps))
-
-    t = torch.zeros(1, device=device)
+    initial_variable_count = int(total_masks)
+    prompt_mask = ~scaffold_mask
 
     for step in range(num_steps):
         mask_positions = current_tokens == mask_token_id
@@ -47,7 +47,17 @@ def s3_denoise(model, hidden_states, labels, scaffold_mask, num_steps=4):
         if mask_indices.dim() == 0:
             mask_indices = mask_indices.unsqueeze(0)
 
-        logits = model.diffusion_head.predict(hidden_states, current_tokens, t)
+        remaining = int(mask_indices.numel())
+        t_val = float(remaining) / float(initial_variable_count)
+        t = torch.full((current_tokens.shape[0],), t_val, device=device, dtype=torch.float)
+
+        logits = model.diffusion_head.predict(
+            hidden_states,
+            current_tokens,
+            t,
+            scaffold_mask=scaffold_mask,
+            prompt_mask=prompt_mask,
+        )
         predictions = torch.argmax(logits, dim=-1)
 
         log_probs = torch.log_softmax(logits[0, mask_indices], dim=-1)
@@ -73,7 +83,7 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
     Evaluate model using S3-style inference (matches actual inference.py strategy).
 
     This tests the REAL inference approach:
-    - Fixed t=0 prediction
+    - Timestep based on remaining masks
     - Top-K confidence-based selection
     - Iterative refinement
     """
@@ -114,6 +124,7 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
             predicted_tokens = s3_denoise(
                 unwrapped_model,
                 hidden_states,
+                input_ids,
                 labels,
                 scaffold_mask,
                 num_steps=diffusion_num_steps
