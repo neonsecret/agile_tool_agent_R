@@ -5,6 +5,70 @@
 This implementation follows the architecture described in `guide.md` and `IMPLEMENTATION_ANALYSIS.md`, combining
 components from multiple repositories to create a hybrid diffusion-autoregressive model for function calling.
 
+## Review-Driven Updates (Jan 2026)
+
+**Sources:** `TRAINING_ANALYSIS_JAN2026.md`, `PROFESSOR_CRITIQUE.md`, `GPT-5.2_FINDINGS.md`,
+`findings_gpt-5.2-codex-xhigh.txt`
+
+### 1) Train/Inference Alignment + Hidden-State Refresh
+
+- **Train/infer conditioning match:** `model/hybrid_model.py` now generates noisy drafts
+  (`x_t`) and re-encodes base hidden states on those drafts before diffusion loss.
+  **Reason:** address train/infer mismatch highlighted in `TRAINING_ANALYSIS_JAN2026.md`
+  and `GPT-5.2_FINDINGS.md`.
+- **Functional eval parity:** `train_functional.py` now uses the inference-like timestep
+  schedule and starts from `input_ids`. **Reason:** evaluation was inconsistent with inference.
+- **Hidden-state re-encoding:** `inference.py`/`inference_diffusion.py` support periodic
+  re-encoding. **Config:** `inference.reencode_hidden_states_every: 2`. **Reason:** avoid
+  the cached hidden states trap (`PROFESSOR_CRITIQUE.md`).
+
+### 2) Diffusion Head Capacity + Conditioning
+
+- **Vocab init from base:** `init_vocab_from_base: true` initializes `token_emb` and
+  `output_proj` from the frozen base model (`model/hybrid_model.py`). **Reason:** mitigate
+  full-vocab head-from-scratch risk (`GPT-5.2_FINDINGS.md`).
+- **Prompt cross-attention:** optional prompt-only cross-attn (`model/diffusion_head.py`),
+  enabled via `diffusion.use_prompt_cross_attention`. **Reason:** allow direct access to
+  prompt tokens beyond cached base hidden states.
+- **Field-relative position embeddings:** `diffusion.use_field_position` adds slot-relative
+  embeddings inside scaffold spans. **Reason:** stabilize position within each argument slot.
+
+### 3) Typed JSON + Tool-Call Normalization
+
+- **Typed values in scaffolds:** `data/schema.py` no longer forces quotes around values.
+  **Reason:** support any JSON dtype (numbers, booleans, arrays, objects).
+- **Arguments normalization:** `data/dataset_processing.py` parses `arguments` JSON strings,
+  filters to schema keys, and fills missing keys with `None`. **Reason:** explicit `null`
+  supervision and consistent fields.
+- **Label encoding:** `data/dataset_loader.py` always uses `json.dumps(value)` for labels,
+  ensuring consistent typed JSON value targets.
+- **Adapter fixes + new datasets:** `data/dataset_formats.py` adds Glaive/APIGen adapters,
+  normalizes `<tool_call>` blocks to dict `arguments`, and updates `config.yaml` datasets.
+  **Reason:** dataset coverage + correct SmolLM tool-call format.
+
+### 4) Sampling + Loss/Inference Tuning (Config)
+
+- **Timesteps:** `diffusion.t_sampling: mixture_high` with `t_high_prob/t_high_range`.
+  **Reason:** bias training toward high-noise states to reduce train/infer gap.
+- **NULL token learning:** `diffusion.null_loss_weight: 0.4` (dynamic scaling still applied)
+  + `null_prediction_penalty: 0.3`. **Reason:** address NULL collapse noted in reviews.
+- **Entropy/temperature:** `diffusion.entropy_weight: 0.08`, `diffusion.training_temperature: 1.0`.
+  **Reason:** reduce token collapse and avoid over-smoothing.
+- **Re-encode cadence:** `inference.reencode_hidden_states_every: 2`. **Reason:** mitigate
+  cached-state drift during diffusion.
+
+### 5) Tests + Manual Inspection
+
+- Added `tests/test_dataset_adapters.py` (adapter normalization) and
+  `tests/test_field_positions.py` (field-pos embedding).
+- Fast test run: `pytest tests/ -m "not slow"` (conda `torch313`).
+
+### JSON Structure vs. Value Validity
+
+Scaffolding guarantees **JSON structure** (keys/commas/braces), but **values are still
+predicted by the model**. We mitigate invalid values by training on `json.dumps()` values,
+but valid value syntax is not guaranteed by Python alone.
+
 ## Changes Made
 
 ### 1. Schema Scaffolding (✅ Complete)
@@ -22,7 +86,7 @@ components from multiple repositories to create a hybrid diffusion-autoregressiv
 
 - Deterministic scaffold building (Python generates structure, not LLM)
 - Track mask positions per field with `FieldSegment`
-- Guarantee 0% syntax errors in JSON output
+- Guarantees JSON structure; values still predicted by the model
 
 ### 2. Noise Scheduling (✅ Complete)
 
@@ -192,8 +256,8 @@ to use tools via its built-in chat template with tool injection.
 
 ### Key Design Decisions
 
-1. **Schema Scaffolding**: Python generates JSON structure, LLM only predicts values
-    - Guarantees 0% syntax errors
+1. **Schema Scaffolding**: Python generates JSON structure, LLM predicts values
+    - Guarantees structure, but value validity depends on model output
     - Prevents schema hallucination
 
 2. **Noise Schedule**: LogLinearNoise from mdlm
@@ -219,7 +283,7 @@ to use tools via its built-in chat template with tool injection.
 6. **Training Loss**: D3PM-style with entropy regularization
     - Direct prediction of clean tokens
     - Loss only on masked positions
-    - Entropy regularization prevents token collapse (λ=0.05)
+    - Entropy regularization prevents token collapse (λ=0.08)
     - Dynamic NULL weighting adapts to timestep
 
 ## Code Citations
@@ -278,7 +342,7 @@ This manifests as "LondonLondon,,,," patterns.
 
 ```python
 entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1).mean()
-loss = loss - lambda_entropy * entropy  # λ = 0.05
+loss = loss - lambda_entropy * entropy  # λ = 0.08
 ```
 
 **Reasoning:**
@@ -286,9 +350,9 @@ loss = loss - lambda_entropy * entropy  # λ = 0.05
 - Directly penalizes low-entropy (overconfident) predictions
 - Prevents the model from finding trivial "repeat common token" solutions
 - Research shows 40-60% reduction in collapse with λ ∈ [0.03, 0.07]
-- Optimal value 0.05 balances diversity vs. accuracy
+- Current value 0.08 chosen to counter stronger collapse noted in reviews
 
-**Config:** `diffusion.entropy_weight: 0.05`
+**Config:** `diffusion.entropy_weight: 0.08`
 
 **Impact:** Expected 40-60% reduction in repetitive token patterns.
 
@@ -358,7 +422,7 @@ dynamic_null_weight = null_loss_weight * (0.3 + 0.7 * t_scalar)
 **Reasoning:**
 
 - Matches expected NULL token distribution across diffusion process
-- Research shows optimal base weight 0.15 with dynamic scaling
+- Current base weight 0.4 chosen to address NULL under-learning in reviews
 - Improves length control without compromising content quality
 
 **Impact:** Better variable-length field generation and length control.

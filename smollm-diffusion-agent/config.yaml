@@ -29,7 +29,7 @@ diffusion:
   use_optimized_attention: true  # Use SDPA-optimized attention (2-3x faster, FlashAttention on CUDA)
   use_attention_mask: false  # Avoids padding attention during training
   init_vocab_from_base: true  # Initialize token_emb/output_proj from base model (trainable)
-  null_loss_weight: 0.15  # Down-weight NULL labels to avoid NULL-dominant solutions
+  null_loss_weight: 0.35  # Down-weight NULL labels to avoid NULL-dominant solutions
   null_prediction_penalty: 0.3  # Penalize NULL predictions on non-NULL labels
   entropy_weight: 0.08  # Higher entropy to reduce collapse
   training_temperature: 1.0  # No temperature smoothing during training
@@ -80,7 +80,7 @@ training:
   logits_for_metrics: true
   resume_from_checkpoint: false
   checkpoint_path: "checkpoints/best_model/model.pt"
-  eval_num_samples: 10  # Number of samples to evaluate on
+  eval_num_samples: 20  # Number of samples to evaluate on
   warmup_steps: 200  # Short warmup; gradient_accum makes batch-step progress faster than optimizer steps
   min_lr_ratio: 0.01  # Minimum LR as fraction of peak (0.01 = 1% of learning_rate, e.g., 1.2e-6)
   ddp_find_unused_parameters: false
@@ -96,7 +96,7 @@ inference:
   steps: 4                 # Number of diffusion denoising steps
   temperature: 0.0         # Sampling temperature (0.0 = greedy)
   max_seq_len: 2048        # Maximum sequence length for inference
-  reencode_hidden_states_every: 0  # 0 = never, 1 = every step, 2 = every 2 steps, etc.
+  reencode_hidden_states_every: 2  # 0 = never, 1 = every step, 2 = every 2 steps, etc.
   # Running Confidence Remasking (RCR) - allows token revision during inference
   remasking:
     enabled: true          # Enable RCR to fix over-denoising and allow token revision
