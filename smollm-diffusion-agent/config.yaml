@@ -44,7 +44,7 @@ training:
   optimizer:
     name: "muon"
     muon:
-      lr: 0.01
+      lr: 0.005
       momentum: 0.95
       weight_decay: 0.01
     adamw:
@@ -54,7 +54,7 @@ training:
       weight_decay: 0.01
   scheduler:
     name: "one_cycle"
-    max_lr: [0.01, 1.2e-4]  # [muon_group, adamw_group]
+    max_lr: [0.005, 1.2e-4]  # [muon_group, adamw_group]
     pct_start: 0.1
     use_warmup_steps: true
     anneal_strategy: "cos"

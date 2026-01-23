@@ -87,7 +87,7 @@ class HybridSmolLM(nn.Module):
             use_attention_mask=use_attention_mask,
         )
 
-        self.diffusion_head = self.diffusion_head.to(dtype=torch.bfloat16)
+        self.diffusion_head = self.diffusion_head.to(device=device, dtype=torch.bfloat16)
 
     def _init_torch_model(self, base_model_id, load_in_4bit, device, use_unsloth=None, max_seq_length=2048,
                           enable_unsloth_inference_opt=True):
