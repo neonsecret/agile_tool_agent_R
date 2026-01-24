@@ -6,10 +6,12 @@ Implements the actual inference strategy used during evaluation.
 
 import torch
 import random
-from typing import Dict
+from typing import Dict, List, Optional, Tuple
 from accelerate import Accelerator
+from torch.utils.data import Subset
 
 from data.device_utils import empty_cache
+from data.smollm3_prompting import encode_tool_call_wrapper
 from train_utils import safe_unwrap_model
 
 
@@ -76,6 +78,59 @@ def s3_denoise(model, hidden_states, input_ids, labels, scaffold_mask, num_steps
         current_tokens[0, selected] = predictions[0, selected]
 
     return current_tokens
+
+
+def _get_processed_example(eval_dataset, idx: int) -> Optional[Dict]:
+    base_dataset = eval_dataset
+    base_idx = idx
+    if isinstance(eval_dataset, Subset):
+        base_dataset = eval_dataset.dataset
+        base_idx = eval_dataset.indices[idx]
+
+    processed = getattr(base_dataset, "processed_examples", None)
+    if processed is None or base_idx >= len(processed):
+        return None
+    return processed[base_idx]
+
+
+def _truncate_text(text: str, max_len: int = 160) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "..."
+
+
+def _extract_field_texts(
+    tokenizer,
+    token_seq: torch.Tensor,
+    template,
+    prompt_len: int,
+    prefix_len: int,
+    null_token_id: Optional[int],
+) -> List[Tuple[str, str]]:
+    field_texts = []
+    for segment in template.field_segments:
+        token_ids = []
+        for pos in segment.value_positions:
+            idx = prompt_len + prefix_len + pos
+            if idx >= token_seq.numel():
+                continue
+            token_id = int(token_seq[idx].item())
+            if token_id < 0:
+                continue
+            if null_token_id is not None and token_id == null_token_id:
+                continue
+            token_ids.append(token_id)
+        text = tokenizer.decode(
+            token_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+        field_texts.append((segment.name, text))
+    return field_texts
+
+
+def _compute_prompt_len(total_len: int, template_len: int, prefix_len: int, suffix_len: int) -> int:
+    return max(0, total_len - (template_len + prefix_len + suffix_len))
 
 
 def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examples=5):
@@ -175,6 +230,45 @@ def functional_evaluation(model, eval_dataset, tokenizer, accelerator, num_examp
             accelerator.print(f"Predicted (masked):    {pred_masked_text}")
             accelerator.print(f"Token Accuracy: {token_accuracy:.2%} ({correct_tokens}/{num_tokens})")
             accelerator.print(f"Exact Match: {'✓' if exact_match else '✗'}")
+
+            processed = _get_processed_example(eval_dataset, idx)
+            if processed is not None:
+                template = processed.get("template")
+                tool_name = processed.get("tool_name")
+                if template is not None and tool_name:
+                    wrapper = encode_tool_call_wrapper(tokenizer, tool_name)
+                    prefix_len = len(wrapper.prefix_ids)
+                    suffix_len = len(wrapper.suffix_ids)
+                    total_len = int(input_ids.shape[1])
+                    prompt_len = _compute_prompt_len(
+                        total_len,
+                        len(template.tokens),
+                        prefix_len,
+                        suffix_len,
+                    )
+                    labels_cpu = labels[0].detach().cpu()
+                    pred_cpu = predicted_tokens[0].detach().cpu()
+                    true_fields = _extract_field_texts(
+                        tokenizer,
+                        labels_cpu,
+                        template,
+                        prompt_len,
+                        prefix_len,
+                        null_token_id,
+                    )
+                    pred_fields = _extract_field_texts(
+                        tokenizer,
+                        pred_cpu,
+                        template,
+                        prompt_len,
+                        prefix_len,
+                        null_token_id,
+                    )
+                    accelerator.print("Field values:")
+                    for (field_name, gt_text), (_, pred_text) in zip(true_fields, pred_fields):
+                        gt_clean = _truncate_text(gt_text)
+                        pred_clean = _truncate_text(pred_text)
+                        accelerator.print(f"  {field_name}: gt={gt_clean} | pred={pred_clean}")
 
     accelerator.print("\n" + "-" * 80)
     empty_cache(accelerator.device)

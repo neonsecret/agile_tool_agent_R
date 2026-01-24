@@ -9,7 +9,7 @@ protobuf
 wandb
 hf_transfer
 git+https://github.com/KellerJordan/Muon
-
+weave
 # CUDA-specific dependencies (install separately on Linux/Windows with NVIDIA GPU)
 bitsandbytes>=0.41.0  # 4-bit quantization
 triton>=2.0.0  # CUDA kernel compilation (required by flash-attn)

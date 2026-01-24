@@ -5,6 +5,7 @@ Matches training's budget calculation logic to ensure consistency
 between training and inference.
 """
 
+import json
 from typing import List, Tuple, Dict, Any
 from transformers import PreTrainedTokenizerBase
 
@@ -33,9 +34,12 @@ def estimate_field_length(
     enum_values = field_spec.get("enum", None)
 
     if enum_values:
-        # For enums, use longest enum value
+        # For enums, use longest enum value in JSON form
         max_enum_len = max(
-            len(tokenizer.encode(str(v), add_special_tokens=False))
+            len(tokenizer.encode(
+                json.dumps(v) if field_type != "string" else json.dumps(str(v)),
+                add_special_tokens=False,
+            ))
             for v in enum_values
         )
         return max_enum_len

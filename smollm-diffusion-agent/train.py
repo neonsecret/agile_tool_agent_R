@@ -1,6 +1,7 @@
 import torch
 import os
 import logging
+import weave
 
 os.environ.setdefault("UNSLOTH_COMPILE_DISABLE", "0")
 

@@ -97,6 +97,7 @@ inference:
   temperature: 0.0         # Sampling temperature (0.0 = greedy)
   max_seq_len: 2048        # Maximum sequence length for inference
   reencode_hidden_states_every: 2  # 0 = never, 1 = every step, 2 = every 2 steps, etc.
+  budget_from_base_tool_call: true
   # Running Confidence Remasking (RCR) - allows token revision during inference
   remasking:
     enabled: true          # Enable RCR to fix over-denoising and allow token revision

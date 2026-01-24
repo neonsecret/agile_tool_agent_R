@@ -2,6 +2,7 @@
 Demo for diffusion-based function call generation.
 """
 
+import json
 import os
 import torch
 from transformers import AutoTokenizer
@@ -35,6 +36,7 @@ def demo_inference():
     temperature = inference_cfg.get("temperature", 0.0)
     cfg_scale = inference_cfg.get("cfg_scale", 0.0)
     reencode_every = inference_cfg.get("reencode_hidden_states_every", 0)
+    budget_from_base = inference_cfg.get("budget_from_base_tool_call", False)
     max_seq_length = inference_kwargs.get("max_seq_len", 2048)
     use_torch_compile = inference_kwargs["use_torch_compile"]
     use_cuda_graph = inference_kwargs["use_cuda_graph"]
@@ -131,7 +133,7 @@ def demo_inference():
 
     print(f"Optimizations: torch.compile={use_torch_compile}, cuda_graph={use_cuda_graph}")
 
-    prompt = "What's the weather in London?"
+    prompt = "What's the weather in Moscow?"
 
     tool_registry = {
         "get_weather": {
@@ -177,13 +179,27 @@ def demo_inference():
     print("=" * 80)
 
     tool_schema = tool_registry["get_weather"]
-    fields = build_fields_from_schema(
-        tool_schema,
-        tokenizer,
-        min_budget=min_field_budget,
-        max_budget=max_field_budget,
-        extra_budget=extra_field_budget,
-    )
+    fields = None
+    if budget_from_base:
+        base_tool_call = generator.generation_ops.select_tool_call(prompt, tool_registry)
+        if base_tool_call is not None and base_tool_call.get("name") == "get_weather":
+            tool_args = base_tool_call.get("arguments", {})
+            props = tool_schema.get("parameters", {}).get("properties", {})
+            fields = []
+            for key in props.keys():
+                val = tool_args.get(key, None)
+                val_json = json.dumps(val)
+                val_ids = tokenizer.encode(val_json, add_special_tokens=False)
+                budget = min(max(len(val_ids) + extra_field_budget, min_field_budget), max_field_budget)
+                fields.append((key, budget))
+    if fields is None:
+        fields = build_fields_from_schema(
+            tool_schema,
+            tokenizer,
+            min_budget=min_field_budget,
+            max_budget=max_field_budget,
+            extra_budget=extra_field_budget,
+        )
 
     print("\nAutomatic budget calculation:")
     print_budget_info(fields)
@@ -209,7 +225,8 @@ def demo_inference():
         template=template,
         config=gen_config,
         trace=True,
-        tool_name="get_weather"
+        tool_name="get_weather",
+        tools=list(tool_registry.values()),
     )
 
     print(f"\n{'=' * 80}")

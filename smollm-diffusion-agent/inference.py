@@ -8,6 +8,7 @@ Implements the S3 (Schema Scaffolding) denoising loop with top-K remasking.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -20,6 +21,7 @@ from tqdm import trange
 from model.hybrid_model import HybridSmolLM
 from data.schema import SchemaTemplate, build_schema_template
 from data.utils import validate_mask_token_consistency
+from data.dataset_processing import get_tool_schema_properties
 from data.budget_utils import build_fields_from_schema, MIN_FIELD_BUDGET
 from data.device_utils import empty_cache
 from data.smollm3_prompting import parse_first_tool_call
@@ -52,6 +54,8 @@ class GenerationConfig:
     remask_ratio: float = 0.2  # Fraction of low-confidence tokens to remask
     min_lock_confidence: float = 0.7  # Min confidence to keep token locked
     reencode_hidden_states_every: int = 0  # 0 = never, 1 = every step, etc.
+    copy_prompt_bias: float = 0.0  # Additive bias for prompt token ids at masked positions
+    restrict_strings_to_prompt: bool = False
 
 
 @dataclass
@@ -104,6 +108,7 @@ class FunctionCallGenerator:
             max_seq_len: int = 2048,
             budget_config: Optional[Dict[str, int]] = None,
             expansion_config: Optional[Dict[str, Any]] = None,
+            budget_from_base_tool_call: bool = True,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -112,6 +117,7 @@ class FunctionCallGenerator:
         self.max_seq_len = max_seq_len
         self.budget_config = budget_config or _default_budget_config()
         self.expansion_config = expansion_config or _default_expansion_config()
+        self.budget_from_base_tool_call = budget_from_base_tool_call
 
         self._kv_cache: Optional[Tuple] = None
         self._cached_prompt_length: int = 0
@@ -279,17 +285,8 @@ class FunctionCallGenerator:
             }
 
         tool_schema = tool_registry[tool_name]
-
-        min_budget = self.budget_config.get("min_tokens", MIN_FIELD_BUDGET)
-        max_budget = self.budget_config.get("max_tokens", 48)
-        extra_budget = self.budget_config.get("extra_tokens", 0)
-        fields = build_fields_from_schema(
-            tool_schema,
-            self.tokenizer,
-            min_budget=min_budget,
-            max_budget=max_budget,
-            extra_budget=extra_budget,
-        )
+        tool_args = tool_call.get("arguments", {})
+        fields = self._build_fields_for_tool(tool_schema, tool_args)
 
         mask_token_str = self.tokenizer.convert_ids_to_tokens(
             [self.model.diffusion_head.mask_token_id]
@@ -325,6 +322,36 @@ class FunctionCallGenerator:
             "tool_call_parsed": parsed,
             "steps_executed": output.steps_executed,
         }
+
+    def _build_fields_for_tool(
+            self,
+            tool_schema: Dict[str, Any],
+            tool_args: Dict[str, Any],
+    ) -> List[Tuple[str, int]]:
+        if not self.budget_from_base_tool_call:
+            return build_fields_from_schema(
+                tool_schema,
+                self.tokenizer,
+                min_budget=self.budget_config.get("min_tokens", MIN_FIELD_BUDGET),
+                max_budget=self.budget_config.get("max_tokens", 48),
+                extra_budget=self.budget_config.get("extra_tokens", 0),
+            )
+
+        props = get_tool_schema_properties(tool_schema)
+        fields = []
+        for key in props.keys():
+            val = tool_args.get(key, None)
+            val_json = json.dumps(val)
+            val_ids = self.tokenizer.encode(val_json, add_special_tokens=False)
+            budget = min(
+                max(
+                    len(val_ids) + self.budget_config.get("extra_tokens", 0),
+                    self.budget_config.get("min_tokens", MIN_FIELD_BUDGET),
+                ),
+                self.budget_config.get("max_tokens", 48),
+            )
+            fields.append((key, budget))
+        return fields
 
     def generate(
             self,
@@ -432,6 +459,43 @@ class FunctionCallGenerator:
 
             budget = self._resolve_budget(cfg, initial_variable_count)
 
+            prompt_token_ids = torch.unique(sequence[0, :prompt_length])
+
+            enum_constraints = {}
+            string_field_positions = set()
+            prompt_allowlist = None
+            if tools and tool_name:
+                tool_schema = next(
+                    (tool for tool in tools if isinstance(tool, dict) and tool.get("name") == tool_name),
+                    None,
+                )
+                if tool_schema is not None:
+                    enum_constraints = self._build_enum_position_constraints(
+                        template,
+                        tool_schema,
+                        prompt_length,
+                        prefix_length,
+                    )
+                    if cfg.restrict_strings_to_prompt:
+                        string_field_positions = self._build_string_field_positions(
+                            template,
+                            tool_schema,
+                            prompt_length,
+                            prefix_length,
+                        )
+            if cfg.restrict_strings_to_prompt and prompt_token_ids.numel() > 0:
+                prompt_allowlist = set(prompt_token_ids.tolist())
+                for token in ['"', ',', ' ', ':', '-', '.', '/', '_']:
+                    prompt_allowlist.update(
+                        self.tokenizer.encode(token, add_special_tokens=False)
+                    )
+                for digit in "0123456789":
+                    prompt_allowlist.update(
+                        self.tokenizer.encode(digit, add_special_tokens=False)
+                    )
+                if template.null_token_id is not None:
+                    prompt_allowlist.add(template.null_token_id)
+
             generation_trace: List[TraceStep] = []
             mask_positions = torch.zeros_like(sequence, dtype=torch.bool)
 
@@ -484,6 +548,30 @@ class FunctionCallGenerator:
                     print(f"  Logits range: [{valid_logits.min():.4f}, {valid_logits.max():.4f}]")
 
                 logits[:, :, template.mask_token_id] = -float('inf')
+                if cfg.copy_prompt_bias > 0 and prompt_token_ids.numel() > 0:
+                    for token_id in prompt_token_ids.tolist():
+                        logits[0, mask_indices, token_id] += cfg.copy_prompt_bias
+                if prompt_allowlist and string_field_positions:
+                    for idx in mask_indices.tolist():
+                        if idx in string_field_positions:
+                            mask = torch.ones(
+                                logits.shape[-1],
+                                dtype=torch.bool,
+                                device=logits.device,
+                            )
+                            mask[list(prompt_allowlist)] = False
+                            logits[0, idx, mask] = -float('inf')
+                if enum_constraints:
+                    for idx in mask_indices.tolist():
+                        allowed = enum_constraints.get(idx)
+                        if allowed:
+                            mask = torch.ones(
+                                logits.shape[-1],
+                                dtype=torch.bool,
+                                device=logits.device,
+                            )
+                            mask[list(allowed)] = False
+                            logits[0, idx, mask] = -float('inf')
 
                 if cfg.show_steps and step <= 1:
                     with torch.no_grad():
@@ -656,3 +744,63 @@ class FunctionCallGenerator:
         if return_state:
             return output, state
         return output
+
+    def _build_string_field_positions(
+            self,
+            template: SchemaTemplate,
+            tool_schema: Dict[str, Any],
+            prompt_length: int,
+            prefix_length: int,
+    ) -> set:
+        props = get_tool_schema_properties(tool_schema)
+        positions = set()
+        for segment in template.field_segments:
+            field_spec = props.get(segment.name, {})
+            field_type = field_spec.get("type", "string")
+            if field_type != "string" or field_spec.get("enum"):
+                continue
+            for pos in segment.value_positions:
+                positions.add(prompt_length + prefix_length + pos)
+        return positions
+
+    def _build_enum_position_constraints(
+            self,
+            template: SchemaTemplate,
+            tool_schema: Dict[str, Any],
+            prompt_length: int,
+            prefix_length: int,
+    ) -> Dict[int, set]:
+        props = get_tool_schema_properties(tool_schema)
+        constraints = {}
+        for segment in template.field_segments:
+            field_spec = props.get(segment.name, {})
+            enum_values = field_spec.get("enum")
+            field_type = field_spec.get("type", "string")
+            if not enum_values:
+                continue
+            token_seqs = [
+                self.tokenizer.encode(
+                    json.dumps(val) if field_type != "string" else json.dumps(str(val)),
+                    add_special_tokens=False,
+                )
+                for val in enum_values
+            ]
+            max_len = max(len(seq) for seq in token_seqs)
+            min_len = min(len(seq) for seq in token_seqs)
+            if max_len > len(segment.value_positions):
+                continue
+            for pos_idx, pos in enumerate(segment.value_positions):
+                allowed = set()
+                if pos_idx < min_len:
+                    for seq in token_seqs:
+                        allowed.add(seq[pos_idx])
+                else:
+                    for seq in token_seqs:
+                        if pos_idx < len(seq):
+                            allowed.add(seq[pos_idx])
+                    if template.null_token_id is not None:
+                        allowed.add(template.null_token_id)
+                if allowed:
+                    global_pos = prompt_length + prefix_length + pos
+                    constraints[global_pos] = allowed
+        return constraints

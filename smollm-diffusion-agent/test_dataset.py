@@ -13,7 +13,8 @@ from transformers import AutoTokenizer
 # Use same import style as train.py
 from data.dataset_loader import SmartScaffoldDataset
 from data.device_utils import get_device
-from data.utils import resolve_mask_token
+from data.utils import resolve_mask_token, resolve_null_token
+from train_eval import _compute_null_counts, _null_metrics_from_counts
 from model.hybrid_model import HybridSmolLM
 from model.diffusion_head import SchemaDiffusionHead
 
@@ -21,6 +22,14 @@ from model.diffusion_head import SchemaDiffusionHead
 def load_config(config_path="config.yaml"):
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
+
+
+def _safe_move_model(model, device):
+    base_map = getattr(model.base_llm, "hf_device_map", None)
+    if base_map is not None:
+        print("Skipping model.to(device): base_llm uses hf_device_map.")
+        return
+    model.to(device)
 
 
 def test_dataset_structure(dataset, tokenizer, num_samples=10):
@@ -436,6 +445,80 @@ def debug_model_input_output(dataset, tokenizer, mask_token_id, model, num_examp
         print(f"   - Positions with labels=-100 are ignored in loss computation")
 
 
+def _compute_grad_norm(params):
+    total = 0.0
+    for param in params:
+        if param.grad is None:
+            continue
+        param_norm = param.grad.data.norm(2).item()
+        total += param_norm ** 2
+    return total ** 0.5
+
+
+def debug_training_step(dataset, model, null_token_id, max_examples=1):
+    print("\n" + "=" * 80)
+    print("DEBUGGING: Single Training Step Metrics")
+    print("=" * 80)
+
+    device = next(model.parameters()).device
+    model.train()
+    shown = 0
+
+    for i in range(len(dataset)):
+        if shown >= max_examples:
+            break
+        sample = dataset[i]
+        if sample["scaffold_mask"].sum() == 0:
+            continue
+
+        input_ids = sample["input_ids"].unsqueeze(0).to(device)
+        attention_mask = sample["attention_mask"].unsqueeze(0).to(device)
+        scaffold_mask = sample["scaffold_mask"].unsqueeze(0).to(device)
+        labels = sample["labels"].unsqueeze(0).to(device)
+
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            scaffold_mask=scaffold_mask,
+            return_logits=True,
+        )
+
+        loss = outputs.get("loss")
+        if loss is None:
+            continue
+        loss_val = float(loss.item())
+        loss.backward()
+        grad_norm = _compute_grad_norm(model.diffusion_head.parameters())
+
+        predictions = outputs.get("predictions")
+        mask_positions = outputs.get("mask_positions", scaffold_mask)
+        if predictions is not None and mask_positions is not None:
+            counts = _compute_null_counts(predictions, labels, mask_positions, null_token_id)
+            null_metrics = _null_metrics_from_counts(counts) if counts is not None else {}
+        else:
+            counts = None
+            null_metrics = {}
+
+        masked_total = int(mask_positions.sum().item()) if mask_positions is not None else 0
+        null_label_ratio = 0.0
+        if counts is not None and counts["total_masked"].item() > 0:
+            null_label_ratio = (
+                counts["null_label"].item() / counts["total_masked"].item()
+            )
+
+        print(f"\nExample {i + 1}")
+        print(f"  loss: {loss_val:.4f}")
+        print(f"  grad_norm: {grad_norm:.4f}")
+        print(f"  masked_positions: {masked_total}")
+        print(f"  null_label_ratio: {null_label_ratio:.4f}")
+        for key, value in null_metrics.items():
+            print(f"  {key}: {value:.4f}")
+
+        model.zero_grad(set_to_none=True)
+        shown += 1
+
+
 def test_chat_examples(dataset, num_samples=10):
     """Test that chat examples (is_tool=0) have no scaffold_mask."""
     print("\n" + "=" * 80)
@@ -491,8 +574,11 @@ def main():
 
     mask_token_config = data_cfg.get("mask_token", None)
     mask_token_str, mask_token_id = resolve_mask_token(tokenizer, mask_token_config)
+    null_token_config = data_cfg.get("null_token", None)
+    null_token_str, null_token_id = resolve_null_token(tokenizer, null_token_config)
 
     print(f"Mask token: {mask_token_str} (ID: {mask_token_id})")
+    print(f"NULL token: {null_token_str} (ID: {null_token_id})")
     print(f"Max sequence length: {training_cfg['max_seq_len']}")
     print(f"Dataset limit: {data_cfg.get('limit', 'None')}")
 
@@ -504,7 +590,12 @@ def main():
         max_new_tokens=training_cfg["max_new_tokens"],
         limit=data_cfg.get("limit", 100),
         mask_token=mask_token_str,
-        mask_budget=data_cfg.get("mask_budget", 48)
+        null_token=null_token_str,
+        mask_budget=data_cfg.get("mask_budget", 48),
+        chat_sampling_rate=data_cfg.get("chat_sampling_rate", 0.1),
+        system_message=data_cfg.get("system_message", "/no_think"),
+        max_history_messages=int(data_cfg.get("max_history_messages", 12)),
+        data_config=config,
     )
 
     print(f"Dataset size: {len(dataset)}")
@@ -538,13 +629,17 @@ def main():
         vocab_size=len(tokenizer)
     )
     model.diffusion_head.set_mask_token_id(mask_token_id)
-    model = model.to(device)
+    model.diffusion_head.set_null_token_id(null_token_id)
+    _safe_move_model(model, device)
 
     print(f"Model loaded successfully")
     print(f"Diffusion head mask_token_id: {model.diffusion_head.mask_token_id}")
 
     debug_model_input_output(
         dataset, tokenizer, mask_token_id, model, num_examples=3
+    )
+    debug_training_step(
+        dataset, model, null_token_id, max_examples=1
     )
 
     print("\n" + "=" * 80)
