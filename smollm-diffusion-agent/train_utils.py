@@ -339,8 +339,12 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
     accelerator.print(f"[CHECKPOINT] Loaded optimizer state")
 
     if 'scheduler_state_dict' in checkpoint and scheduler is not None:
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        accelerator.print(f"[CHECKPOINT] Loaded scheduler state")
+        try:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            accelerator.print(f"[CHECKPOINT] Loaded scheduler state")
+        except (KeyError, TypeError) as e:
+            accelerator.print(f"[CHECKPOINT] WARNING: Scheduler state incompatible (type mismatch), using fresh scheduler")
+            accelerator.print(f"[CHECKPOINT] (Error: {type(e).__name__}: {e})")
     else:
         accelerator.print(f"[CHECKPOINT] No scheduler state in checkpoint (or scheduler is None)")
 
