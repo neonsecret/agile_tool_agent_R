@@ -260,16 +260,20 @@ def train():
 
     resume_from_checkpoint = training_cfg.get("resume_from_checkpoint", False)
     checkpoint_path = training_cfg.get("checkpoint_path", "checkpoints/best_model/model.pt")
+    weights_only = training_cfg.get("load_weights_only", False)
     
     accelerator.print("=" * 80)
     accelerator.print("CHECKPOINT STATUS:")
     accelerator.print(f"  resume_from_checkpoint: {resume_from_checkpoint}")
     accelerator.print(f"  checkpoint_path: {checkpoint_path}")
+    accelerator.print(f"  load_weights_only: {weights_only}")
     
     if resume_from_checkpoint:
         if os.path.exists(checkpoint_path):
             accelerator.print(f"  Status: RESUMING from existing checkpoint")
-            start_epoch, best_eval_loss = load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator)
+            start_epoch, best_eval_loss = load_checkpoint(
+                checkpoint_path, model, optimizer, scheduler, accelerator, weights_only=weights_only
+            )
             global_step = start_epoch * num_update_steps_per_epoch
             accelerator.print(f"  Resumed to epoch {start_epoch}, global step {global_step}")
         else:

@@ -301,7 +301,7 @@ def safe_unwrap_model(model):
     return model
 
 
-def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
+def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator, weights_only=False):
     import os
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(
@@ -310,7 +310,7 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
         )
 
     accelerator.print(f"[CHECKPOINT] Loading checkpoint from: {checkpoint_path}")
-    accelerator.print(f"[CHECKPOINT] Checkpoint file exists: {os.path.exists(checkpoint_path)}")
+    accelerator.print(f"[CHECKPOINT] Mode: {'weights_only' if weights_only else 'full_resume'}")
     checkpoint = torch.load(checkpoint_path, map_location=accelerator.device)
     accelerator.print(f"[CHECKPOINT] Checkpoint loaded successfully")
 
@@ -335,6 +335,11 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
         else:
             accelerator.print("[CHECKPOINT] WARNING: No trainable parameters found in checkpoint")
     
+    if weights_only:
+        accelerator.print(f"[CHECKPOINT] Skipping optimizer/scheduler/epoch (weights_only=True)")
+        accelerator.print(f"[CHECKPOINT] Starting fresh training from epoch 0")
+        return 0, float('inf')
+
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     accelerator.print(f"[CHECKPOINT] Loaded optimizer state")
 
