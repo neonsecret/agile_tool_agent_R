@@ -1,6 +1,7 @@
 import json
 import hashlib
 import pickle
+import random
 import torch
 import torch.distributed as dist
 from pathlib import Path
@@ -261,16 +262,38 @@ class SmartScaffoldDataset(Dataset):
 
     def _compute_budget(self, value_length: int) -> int:
         if not self.dynamic_budget["enabled"]:
-            return min(max(value_length, MIN_FIELD_BUDGET), self.mask_budget)
-
-        budget = value_length + self.dynamic_budget["extra_tokens"]
-        min_tokens = self.dynamic_budget["min_tokens"]
-        if min_tokens is not None:
-            budget = max(budget, min_tokens)
-        max_tokens = self.dynamic_budget["max_tokens"]
-        if max_tokens is not None:
-            budget = min(budget, max_tokens)
-        return max(budget, 0)
+            base_budget = min(max(value_length, MIN_FIELD_BUDGET), self.mask_budget)
+        else:
+            budget = value_length + self.dynamic_budget["extra_tokens"]
+            min_tokens = self.dynamic_budget["min_tokens"]
+            if min_tokens is not None:
+                budget = max(budget, min_tokens)
+            max_tokens = self.dynamic_budget["max_tokens"]
+            if max_tokens is not None:
+                budget = min(budget, max_tokens)
+            base_budget = max(budget, 0)
+        
+        length_jitter = self.dynamic_budget.get("length_jitter", {})
+        if length_jitter.get("enabled", False):
+            jitter_mode = length_jitter.get("mode", "over")
+            min_jitter = length_jitter.get("min_jitter", 0)
+            max_jitter = length_jitter.get("max_jitter", 5)
+            
+            if jitter_mode == "over":
+                extra_budget = random.randint(min_jitter, max_jitter)
+                base_budget = base_budget + extra_budget
+            elif jitter_mode == "under":
+                reduction = random.randint(min_jitter, min(max_jitter, base_budget - 1))
+                base_budget = max(base_budget - reduction, 1)
+            elif jitter_mode == "both":
+                if random.random() < 0.5:
+                    extra_budget = random.randint(min_jitter, max_jitter)
+                    base_budget = base_budget + extra_budget
+                else:
+                    reduction = random.randint(min_jitter, min(max_jitter, base_budget - 1))
+                    base_budget = max(base_budget - reduction, 1)
+        
+        return base_budget
 
     def __getitem__(self, idx):
         ex = self.processed_examples[idx]

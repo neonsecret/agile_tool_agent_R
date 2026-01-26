@@ -7,31 +7,63 @@ components from multiple repositories to create a hybrid diffusion-autoregressiv
 
 ## Review-Driven Updates (Jan 2026)
 
-**Sources:** `TRAINING_ANALYSIS_JAN2026.md`, `PROFESSOR_CRITIQUE.md`, `GPT-5.2_FINDINGS.md`,
-`findings_gpt-5.2-codex-xhigh.txt`
+### Training Run Analysis (Jan 23, 2026)
+
+**Training Configuration:**
+- 5x NVIDIA RTX 4000 Ada (20GB each), 6 epochs, ~15 hours
+- 111,004 examples (86,456 train / 4,550 eval)
+- Final eval loss: 3.7753, best checkpoint saved
+
+**Core Issues Identified:**
+
+1. **Token Collapse & Repetition:**
+   - Demo output shows severe repetition: `"Londonongo UnitedontJohnJohnJohnjjjjyyillaillaillaillahhhillailla"`
+   - Exact match rate: 30-50% on small samples, drops after epoch 5
+   - Token accuracy: 48.99% at final step
+
+2. **Train/Inference Mismatch:**
+   - Training uses random timesteps `t ~ U(0,1)` (avg 50% tokens masked)
+   - Inference starts with 100% tokens masked (fully-masked state never seen in training)
+   - Model never learns to handle early diffusion states properly
+
+3. **Hidden States Caching Problem:**
+   - Base model sees `{"location": "<MASK><MASK>..."}` once, hidden states frozen
+   - Diffusion head operates in vacuum without semantic context from base model
+   - Base model cannot contribute to diffusion process (unlike LLaDA/other diffusion LLMs)
+
+4. **Diffusion Head Learning Full Vocab from Scratch:**
+   - `token_emb` and `output_proj` over ~128k vocab learned from scratch
+   - High capacity requirement for moderate dataset
+   - Benefits from tying/initializing from frozen base model embeddings
+
+5. **Functional Evaluation Mismatch:**
+   - `train_functional.py` uses `t = 0` for all steps (mismatches training's random `t`)
+   - Evaluation uses different `current_tokens` shape than inference
+   - Metrics not trustworthy as deployment proxy
 
 ### 1) Train/Inference Alignment + Hidden-State Refresh
 
 - **Train/infer conditioning match:** `model/hybrid_model.py` now generates noisy drafts
   (`x_t`) and re-encodes base hidden states on those drafts before diffusion loss.
-  **Reason:** address train/infer mismatch highlighted in `TRAINING_ANALYSIS_JAN2026.md`
-  and `GPT-5.2_FINDINGS.md`.
-- **Functional eval parity:** `train_functional.py` now uses the inference-like timestep
-  schedule and starts from `input_ids`. **Reason:** evaluation was inconsistent with inference.
+  **Reason:** model never saw fully-masked state during training.
+- **Timestep bias:** `diffusion.t_sampling: mixture_high` biases training toward high-noise
+  states (t > 0.8) to match inference start condition.
+- **Functional eval parity:** `train_functional.py` now uses inference-like timestep
+  schedule and starts from `input_ids`.
 - **Hidden-state re-encoding:** `inference.py`/`inference_diffusion.py` support periodic
-  re-encoding. **Config:** `inference.reencode_hidden_states_every: 2`. **Reason:** avoid
-  the cached hidden states trap (`PROFESSOR_CRITIQUE.md`).
+  re-encoding every N steps. **Config:** `inference.reencode_hidden_states_every: 2`.
+  **Reason:** base model needs to see partial solutions, not just initial masked scaffold.
 
 ### 2) Diffusion Head Capacity + Conditioning
 
 - **Vocab init from base:** `init_vocab_from_base: true` initializes `token_emb` and
-  `output_proj` from the frozen base model (`model/hybrid_model.py`). **Reason:** mitigate
-  full-vocab head-from-scratch risk (`GPT-5.2_FINDINGS.md`).
+  `output_proj` from the frozen base model (`model/hybrid_model.py`). **Reason:** reduce
+  degrees of freedom, stabilize early training, avoid garbage token modes.
 - **Prompt cross-attention:** optional prompt-only cross-attn (`model/diffusion_head.py`),
   enabled via `diffusion.use_prompt_cross_attention`. **Reason:** allow direct access to
   prompt tokens beyond cached base hidden states.
 - **Field-relative position embeddings:** `diffusion.use_field_position` adds slot-relative
-  embeddings inside scaffold spans. **Reason:** stabilize position within each argument slot.
+  embeddings inside scaffold spans. **Reason:** model lacks "where am I in the field?" signal.
 
 ### 3) Typed JSON + Tool-Call Normalization
 
@@ -48,20 +80,42 @@ components from multiple repositories to create a hybrid diffusion-autoregressiv
 
 ### 4) Sampling + Loss/Inference Tuning (Config)
 
-- **Timesteps:** `diffusion.t_sampling: mixture_high` with `t_high_prob/t_high_range`.
-  **Reason:** bias training toward high-noise states to reduce train/infer gap.
-- **NULL token learning:** `diffusion.null_loss_weight: 0.4` (dynamic scaling still applied)
-  + `null_prediction_penalty: 0.3`. **Reason:** address NULL collapse noted in reviews.
-- **Entropy/temperature:** `diffusion.entropy_weight: 0.08`, `diffusion.training_temperature: 1.0`.
-  **Reason:** reduce token collapse and avoid over-smoothing.
-- **Re-encode cadence:** `inference.reencode_hidden_states_every: 2`. **Reason:** mitigate
-  cached-state drift during diffusion.
+- **Timesteps:** `diffusion.t_sampling: mixture_high` with `t_high_prob: 0.3`, `t_high_range: [0.8, 1.0]`.
+  **Reason:** 30% of training sees high-noise states (t ∈ [0.8, 1.0]) to match inference start.
+- **NULL token learning:** `diffusion.null_loss_weight: 0.4` (up from 0.1, dynamic scaling still applied)
+  + `null_prediction_penalty: 0.3`. **Reason:** model treats padding slots as content slots.
+- **Entropy/temperature:** `diffusion.entropy_weight: 0.08` (up from 0.025), `diffusion.training_temperature: 1.0`.
+  **Reason:** prevent token collapse, reduce overconfident repetitive predictions.
+- **Re-encode cadence:** `inference.reencode_hidden_states_every: 2`. **Reason:** update
+  base model's view of partial solutions during diffusion.
 
 ### 5) Tests + Manual Inspection
 
 - Added `tests/test_dataset_adapters.py` (adapter normalization) and
   `tests/test_field_positions.py` (field-pos embedding).
 - Fast test run: `pytest tests/ -m "not slow"` (conda `torch313`).
+
+### Expected Improvements After Fixes
+
+**With implemented fixes:**
+- 70-85% exact match rate on function calling benchmarks (competitive with pure AR)
+- Stable performance without post-peak degradation
+- Coherent generation with proper context integration
+- Better variable-length field handling
+
+**Current state (before fixes):**
+- 30-50% exact match rate
+- Token collapse and repetition
+- Diffusion head operates in isolation from base model
+- Over-predicting NULL tokens (70-95% in early training)
+
+### Architecture Recommendations (Not Yet Implemented)
+
+1. **Constrained decoding for enums:** Restrict logits to allowed tokenizations for enum fields
+2. **Repetition penalty loss:** Penalize consecutive identical token predictions
+3. **Curriculum learning:** Start with short fields (2-5 tokens), increase to 32-token budgets
+4. **Increase capacity if needed:** Consider 6-8 layers instead of 4 for diffusion head
+5. **Teacher forcing during inference:** Reveal ground truth for first N tokens at step 1
 
 ### JSON Structure vs. Value Validity
 

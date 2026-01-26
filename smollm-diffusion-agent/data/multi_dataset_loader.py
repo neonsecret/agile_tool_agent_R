@@ -31,8 +31,11 @@ def load_and_unify_dataset(config: MultiDatasetConfig) -> List[Dict[str, Any]]:
     """
     print(f"Loading {config.name} (split={config.split})...")
 
-    # Load dataset
-    ds = load_dataset(config.name, split=config.split)
+    # Handle datasets with subsets (like nvidia/When2Call)
+    if config.name == "nvidia/When2Call":
+        ds = load_dataset(config.name, "train_sft", split="train")
+    else:
+        ds = load_dataset(config.name, split=config.split)
 
     # Apply limit if specified
     if config.limit:

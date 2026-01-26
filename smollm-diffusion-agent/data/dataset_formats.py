@@ -378,6 +378,155 @@ class NousHermesAdapter:
         return UnifiedExample(conversations=[], tools="[]")
 
 
+class ArgillaAPIGenAdapter:
+    """
+    Adapter for argilla/apigen-function-calling dataset.
+    
+    Format:
+        - query: str (user query)
+        - answers: str (JSON list of tool calls)
+        - tools: str (JSON list of tool schemas)
+    
+    Similar to XLAM format.
+    """
+
+    @staticmethod
+    def convert(example: Dict[str, Any]) -> UnifiedExample:
+        query = example.get("query", "")
+        answers_str = example.get("answers", "[]")
+        tools = example.get("tools", "[]")
+
+        try:
+            answers = json.loads(answers_str) if isinstance(answers_str, str) else answers_str
+        except json.JSONDecodeError:
+            answers = []
+
+        conversations = [{"from": "human", "value": query}]
+
+        if answers and len(answers) > 0:
+            tool_calls_text = []
+            for answer in answers:
+                if isinstance(answer, dict):
+                    name = answer.get("name", "")
+                    arguments = answer.get("arguments", {})
+                    tool_calls_text.append(_format_tool_call(name, arguments))
+
+            assistant_response = "\n\n".join(tool_calls_text)
+            conversations.append({"from": "gpt", "value": assistant_response})
+
+        return UnifiedExample(conversations=conversations, tools=tools)
+
+
+class When2CallAdapter:
+    """
+    Adapter for nvidia/When2Call dataset.
+    
+    Format (SFT version):
+        - tools: list of tool schemas
+        - messages: list of dicts with "role" and "content"
+    """
+
+    @staticmethod
+    def convert(example: Dict[str, Any]) -> UnifiedExample:
+        tools = example.get("tools", [])
+        messages = example.get("messages", [])
+
+        conversations = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            
+            if role == "user":
+                conversations.append({"from": "human", "value": content})
+            elif role == "assistant":
+                conversations.append({"from": "gpt", "value": content})
+            elif role == "system":
+                conversations.append({"from": "system", "value": content})
+
+        conversations = _normalize_tool_calls_in_conversations(conversations)
+
+        if isinstance(tools, str):
+            tools_str = tools
+        else:
+            tools_str = json.dumps(tools) if tools else "[]"
+
+        return UnifiedExample(conversations=conversations, tools=tools_str)
+
+
+class NestfulAdapter:
+    """
+    Adapter for ibm-research/nestful dataset.
+    
+    Format:
+        - input: str (user query)
+        - output: list of function calls (nested with variable references)
+        - tools: list of tool definitions
+    
+    Note: This dataset has nested function calls with special $var_X.result$ syntax.
+    We'll convert this to simple sequential calls for now.
+    """
+
+    @staticmethod
+    def convert(example: Dict[str, Any]) -> UnifiedExample:
+        query = example.get("input", "")
+        output_str = example.get("output", "[]")
+        tools = example.get("tools", "[]")
+
+        try:
+            output_calls = json.loads(output_str) if isinstance(output_str, str) else output_str
+        except json.JSONDecodeError:
+            output_calls = []
+
+        conversations = [{"from": "human", "value": query}]
+
+        if output_calls and len(output_calls) > 0:
+            tool_calls_text = []
+            for call in output_calls:
+                if isinstance(call, dict):
+                    name = call.get("name", "")
+                    arguments = call.get("arguments", {})
+                    
+                    resolved_args = {}
+                    for key, val in arguments.items():
+                        if isinstance(val, str) and val.startswith("$") and val.endswith("$"):
+                            resolved_args[key] = f"<ref>{val}</ref>"
+                        else:
+                            resolved_args[key] = val
+                    
+                    tool_calls_text.append(_format_tool_call(name, resolved_args))
+
+            assistant_response = "\n\n".join(tool_calls_text)
+            conversations.append({"from": "gpt", "value": assistant_response})
+
+        if isinstance(tools, str):
+            tools_str = tools
+        else:
+            tools_str = json.dumps(tools) if tools else "[]"
+
+        return UnifiedExample(conversations=conversations, tools=tools_str)
+
+
+class SyntheticCodeAdapter:
+    """
+    Adapter for synthetic code tool-call dataset.
+    
+    Format:
+        - conversations: list of dicts with "from" and "value"
+        - tools: JSON string of tool schemas
+    
+    Already in correct format, just pass through.
+    """
+
+    @staticmethod
+    def convert(example: Dict[str, Any]) -> UnifiedExample:
+        conversations = example.get("conversations", [])
+        conversations = _normalize_tool_calls_in_conversations(conversations)
+        return UnifiedExample(
+            conversations=conversations,
+            tools=example.get("tools", "[]")
+        )
+
+
 # Registry of adapters
 DATASET_ADAPTERS = {
     "interstellarninja/hermes_reasoning_tool_use": HermesReasoningAdapter,
@@ -385,6 +534,10 @@ DATASET_ADAPTERS = {
     "glaiveai/glaive-function-calling-v2": GlaiveV2Adapter,
     "Salesforce/APIGen-MT-5k": APIGenMTAdapter,
     "NousResearch/hermes-function-calling-v1": NousHermesAdapter,
+    "argilla/apigen-function-calling": ArgillaAPIGenAdapter,
+    "nvidia/When2Call": When2CallAdapter,
+    "ibm-research/nestful": NestfulAdapter,
+    "synthetic_code_toolcalls": SyntheticCodeAdapter,
 }
 
 

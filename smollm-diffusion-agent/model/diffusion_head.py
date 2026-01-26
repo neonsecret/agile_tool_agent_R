@@ -172,7 +172,7 @@ class SchemaDiffusionHead(nn.Module):
                 if high_mask.any():
                     high_samples = torch.rand(int(high_mask.sum().item()), device=device)
                     t[high_mask] = (
-                        high_samples * (self.t_high_max - self.t_high_min) + self.t_high_min
+                            high_samples * (self.t_high_max - self.t_high_min) + self.t_high_min
                     )
             return t
         return torch.rand(batch_size, device=device)
