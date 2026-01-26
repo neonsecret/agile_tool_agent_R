@@ -258,11 +258,29 @@ def train():
     global_step = 0
     batch_step = 0
 
-    if training_cfg.get("resume_from_checkpoint", False):
-        checkpoint_path = training_cfg.get("checkpoint_path", "checkpoints/best_model/model.pt")
-        start_epoch, best_eval_loss = load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator)
-        global_step = start_epoch * num_update_steps_per_epoch
-        accelerator.print(f"Starting from epoch {start_epoch}, global step {global_step}")
+    resume_from_checkpoint = training_cfg.get("resume_from_checkpoint", False)
+    checkpoint_path = training_cfg.get("checkpoint_path", "checkpoints/best_model/model.pt")
+    
+    accelerator.print("=" * 80)
+    accelerator.print("CHECKPOINT STATUS:")
+    accelerator.print(f"  resume_from_checkpoint: {resume_from_checkpoint}")
+    accelerator.print(f"  checkpoint_path: {checkpoint_path}")
+    
+    if resume_from_checkpoint:
+        import os
+        if os.path.exists(checkpoint_path):
+            accelerator.print(f"  Status: RESUMING from existing checkpoint")
+            start_epoch, best_eval_loss = load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator)
+            global_step = start_epoch * num_update_steps_per_epoch
+            accelerator.print(f"  Resumed to epoch {start_epoch}, global step {global_step}")
+        else:
+            accelerator.print(f"  Status: WARNING - Checkpoint file not found, starting from scratch")
+            accelerator.print(f"  Expected checkpoint at: {checkpoint_path}")
+            accelerator.print(f"  Training will start from epoch 0")
+    else:
+        accelerator.print(f"  Status: Starting NEW training (no checkpoint resume)")
+    
+    accelerator.print("=" * 80)
 
     # 8. Training Loop
     accelerator.print("Starting training loop...")

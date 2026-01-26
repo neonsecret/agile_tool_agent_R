@@ -304,10 +304,15 @@ def safe_unwrap_model(model):
 def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
     import os
     if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
+        raise FileNotFoundError(
+            f"Checkpoint not found at {checkpoint_path}\n"
+            f"Please ensure the checkpoint file exists or set resume_from_checkpoint: false"
+        )
 
-    accelerator.print(f"Loading checkpoint from {checkpoint_path}")
+    accelerator.print(f"[CHECKPOINT] Loading checkpoint from: {checkpoint_path}")
+    accelerator.print(f"[CHECKPOINT] Checkpoint file exists: {os.path.exists(checkpoint_path)}")
     checkpoint = torch.load(checkpoint_path, map_location=accelerator.device)
+    accelerator.print(f"[CHECKPOINT] Checkpoint loaded successfully")
 
     unwrapped_model = safe_unwrap_model(model)
     checkpoint_state = checkpoint['model_state_dict']
@@ -316,25 +321,35 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator):
         missing_keys, unexpected_keys = unwrapped_model.load_trainable_state_dict(
             checkpoint_state, strict=False
         )
-        accelerator.print(f"Loaded trainable parameters (diffusion_head)")
+        accelerator.print(f"[CHECKPOINT] Loaded trainable parameters (diffusion_head)")
+        if missing_keys:
+            accelerator.print(f"[CHECKPOINT] Missing keys: {len(missing_keys)}")
+        if unexpected_keys:
+            accelerator.print(f"[CHECKPOINT] Unexpected keys: {len(unexpected_keys)}")
     else:
         filtered_state = {k: v for k, v in checkpoint_state.items() 
                          if k.startswith('diffusion_head.')}
         if filtered_state:
             unwrapped_model.load_state_dict(filtered_state, strict=False)
-            accelerator.print(f"Loaded {len(filtered_state)} trainable parameters")
+            accelerator.print(f"[CHECKPOINT] Loaded {len(filtered_state)} trainable parameters")
         else:
-            accelerator.print("Warning: No trainable parameters found in checkpoint")
+            accelerator.print("[CHECKPOINT] WARNING: No trainable parameters found in checkpoint")
     
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    accelerator.print(f"[CHECKPOINT] Loaded optimizer state")
 
     if 'scheduler_state_dict' in checkpoint and scheduler is not None:
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        accelerator.print("Loaded scheduler state from checkpoint")
+        accelerator.print(f"[CHECKPOINT] Loaded scheduler state")
+    else:
+        accelerator.print(f"[CHECKPOINT] No scheduler state in checkpoint (or scheduler is None)")
 
     start_epoch = checkpoint['epoch'] + 1
     best_eval_loss = checkpoint['eval_loss']
 
-    accelerator.print(f"Resumed from epoch {checkpoint['epoch']}, best eval loss: {best_eval_loss:.4f}")
+    accelerator.print(f"[CHECKPOINT] Checkpoint info:")
+    accelerator.print(f"  - Previous epoch: {checkpoint['epoch']}")
+    accelerator.print(f"  - Resuming from epoch: {start_epoch}")
+    accelerator.print(f"  - Best eval loss: {best_eval_loss:.4f}")
 
     return start_epoch, best_eval_loss
