@@ -47,7 +47,7 @@ diffusion:
 # Effective batch size = batch_size * num_gpus * gradient_accumulation_steps = 4 * 4 * 4 = 64
 # Note: batch_size 6 OOMs due to diffusion head output_proj ([batch, seq, vocab=128K] tensor)
 training:
-  batch_size: 4
+  batch_size: 6
   learning_rate: 2.0e-5  # Lower LR for post-training (was 1.2e-4 for initial training)
   optimizer:
     name: "muon"
