@@ -267,7 +267,6 @@ def train():
     accelerator.print(f"  checkpoint_path: {checkpoint_path}")
     
     if resume_from_checkpoint:
-        import os
         if os.path.exists(checkpoint_path):
             accelerator.print(f"  Status: RESUMING from existing checkpoint")
             start_epoch, best_eval_loss = load_checkpoint(checkpoint_path, model, optimizer, scheduler, accelerator)
