@@ -751,3 +751,217 @@ python validate_setup.py
 - ✅ Metrics calculation (NULL tokens, fields, parsing)
 
 All 61 fast tests pass on both CUDA and MPS (54 original + 7 metrics tests).
+
+## Post-Training Preparation (Jan 26, 2026)
+
+**Problem:** Diffusion model at 21% accuracy vs base AR at 94% (73 point regression).
+
+**Root Cause:** Train/inference distribution shift - diffusion head operates "blind" because hidden states are cached from fully-masked tokens and never updated during generation.
+
+### Changes Implemented for Post-Training
+
+#### 1. Inference Re-encoding Fix (CRITICAL)
+
+**File:** `config.yaml`
+
+Changed `reencode_hidden_states_every` from `2` to `1`:
+
+```yaml
+inference:
+  reencode_hidden_states_every: 1  # Was: 2
+```
+
+**Impact:** Base model re-encodes hidden states at EVERY diffusion step, providing fresh semantic context. Addresses the "blind diffusion" problem where the model couldn't see its own partial generations.
+
+**Trade-off:** Increases latency (~10-15%) but necessary for accuracy.
+
+#### 2. Length Robustness Training
+
+**Files:** `data/dataset_loader.py`, `config.yaml`
+
+Added bidirectional length jitter to `_compute_budget()`:
+
+- **Over-budget jitter:** Adds 0-5 extra tokens, forces model to predict NULL for unused slots
+- **Under-budget jitter:** Reduces by 0-5 tokens, forces model to be concise
+- **Mode: "both"** - Randomly chooses over OR under each time
+
+```yaml
+data:
+  dynamic_budget:
+    length_jitter:
+      enabled: true
+      mode: "both"  # over + under budget
+      min_jitter: 0
+      max_jitter: 5
+```
+
+**Impact:** Model learns robust length control - when to STOP generating (NULL tokens) and when to be concise.
+
+**Rationale:** Per "someone" and "unknown" analyses - prevents memorizing exact field lengths, improves variable-length field handling.
+
+#### 3. Dataset Expansion
+
+**Files:** `config.yaml`, `data/dataset_formats.py`, `data/multi_dataset_loader.py`
+
+**Added 3 new datasets:**
+
+1. **argilla/apigen-function-calling** (48.5k samples, weight 1.0)
+   - Code-focused APIs with diverse argument types
+   - Includes mathematical functions, data processing, code utilities
+   
+2. **nvidia/When2Call** (15k samples, weight 0.5, subset: train_sft)
+   - Teaches when NOT to call tools
+   - Decision-making: tool call vs direct answer vs ask for clarification
+   
+3. **ibm-research/nestful** (1.86k samples, weight 1.0)
+   - Nested function calls with sequential dependencies
+   - Mathematical reasoning with chained operations
+
+**Final Distribution:**
+- Function calling: ~117,500 (70%)
+- Code/Math-heavy: ~50,360 (30%)
+- Total: ~167,860 examples
+
+**Rationale:** Per user requirement - 30% coding data to teach handling complex string arguments without type-based shortcuts.
+
+#### 4. New Dataset Adapters
+
+**File:** `data/dataset_formats.py`
+
+Added 4 new adapters:
+
+- `ArgillaAPIGenAdapter` - Handles argilla/apigen format (query/answers/tools)
+- `When2CallAdapter` - Handles nvidia/When2Call format (messages with roles)
+- `NestfulAdapter` - Handles ibm-research/nestful format (nested calls with $var references)
+- `SyntheticCodeAdapter` - For future synthetic code-heavy examples
+
+**Total adapters:** 9 (was 5)
+
+#### 5. Synthetic Code Tool-Call Generator
+
+**File:** `data/generate_code_toolcalls.py` (NEW)
+
+Creates code-heavy tool-call training examples with tools:
+- `execute_python` - Python code as string arguments
+- `write_file` - File content with multiline strings
+- `run_shell` - Shell commands
+- `apply_patch` - Diff/patch content
+- `search_code` - Regex patterns
+
+**Data sources:**
+- Hand-crafted simple examples (factorial, fibonacci, file I/O)
+- HuggingFace datasets: `python_code_instructions_18k_alpaca`, `python-codes-25k`
+
+**Usage:**
+```bash
+cd data
+python generate_code_toolcalls.py  # Generates code_toolcalls_synthetic.json
+```
+
+**Target:** 10-20k examples with multiline strings, special characters, escaping.
+
+#### 6. Post-Training Configuration
+
+**File:** `config.yaml`
+
+Updated training settings for fine-tuning:
+
+```yaml
+training:
+  learning_rate: 2.0e-5  # Reduced from 1.2e-4 (83% reduction)
+  optimizer:
+    muon.lr: 0.001  # Reduced from 0.005
+    adamw.lr: 2.0e-5  # Reduced from 1.2e-4
+  scheduler:
+    name: "cosine"  # Changed from "one_cycle"
+  num_epochs: 2  # Reduced from 6
+  resume_from_checkpoint: true  # Changed from false
+  warmup_steps: 100  # Reduced from 200
+  wandb_project: "smollm-diffusion-agent-posttrain"  # Track separately
+```
+
+**Rationale:** Lower LR + cosine schedule prevent catastrophic forgetting during fine-tuning on new data distribution.
+
+### Architecture Clarifications
+
+#### What Model Learns (Training)
+
+**Input:** Prompt + conversation history + schema scaffold with `<MASK>` tokens
+
+**Output:** Predict token IDs at masked positions OR `<NULL>` for unused slots
+
+**Loss:** Cross-entropy ONLY on scaffold positions (prompt is ignored)
+
+**Example:**
+```
+Input:  "Get weather for London" → scaffold: {"location": <MASK><MASK><MASK>}
+Labels: scaffold positions → ["Lon", "don", <NULL>]
+```
+
+#### Inference Pipeline (Unchanged)
+
+1. **Base model AR generation** - Selects tool name (frozen, not trained)
+2. **Python scaffolding** - Builds JSON structure with MASK tokens
+3. **Diffusion head** - Fills ONLY the argument values (4 denoising steps)
+4. **Output** - Complete JSON tool call
+
+**Key:** Base model is frozen. We only train the diffusion head.
+
+### Multi-Turn Handling
+
+**Status:** Multi-turn conversations ARE supported.
+
+- `max_history_messages: 12` keeps last 12 conversation turns before the tool call
+- `build_messages()` includes conversation context in prompt
+- Model sees full dialogue history when predicting arguments
+
+### No Type-Based Shortcuts (Per User Requirement)
+
+Implementation enforces semantic learning:
+- ❌ No enum constraints from schema at inference
+- ❌ No type coercion based on field types
+- ❌ No constrained decoding
+- ✅ Model learns dates, times, numbers, code purely from training data
+
+This makes the task harder but ensures generality for code generation and unseen argument patterns.
+
+### Expected Outcomes
+
+**Performance targets after post-training:**
+
+| Metric | Current | Target |
+|--------|---------|--------|
+| BFCL Accuracy | 21% | 70-85% |
+| value_error:string | 26 | <10 |
+| missing_required | 20 | <8 |
+| type_error:simple | 19 | <10 |
+
+**What model learns:**
+1. Value extraction from prompts (re-encoding provides guidance)
+2. Length control (jitter teaches NULL prediction)
+3. Code-like arguments (multiline strings, special chars)
+4. Decision-making (when to call tools from When2Call)
+5. Sequential reasoning (nested calls from Nestful)
+
+### Post-Training Execution
+
+```bash
+# 1. Clear cache (new datasets + length jitter)
+rm -rf data_cache/
+
+# 2. Run post-training
+accelerate launch --config_file accelerate_config_multigpu.yaml train.py
+
+# 3. Evaluate
+python benchmark/evaluate.py --model diffusion --limit 200
+```
+
+**Monitoring:** Watch `train/real_token_accuracy` (should stay >80%), `train/null_prediction_rate` (should decrease), `eval/exact_match_rate` (should increase).
+
+### Documentation
+
+- `POSTTRAIN_PREP.md` - Detailed implementation notes (deleted per user preference)
+- `POST_TRAINING_README.md` - Quick start guide (deleted per user preference)
+- `CHANGES_OVERVIEW.md` - Visual overview (deleted per user preference)
+- `verify_posttrain_setup.py` - Automated verification script
+- `inspect_training_data.py` - Hand-inspect actual training examples
