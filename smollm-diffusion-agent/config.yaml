@@ -80,6 +80,7 @@ training:
   logits_for_metrics: true
   resume_from_checkpoint: true  # Set to true for post-training
   checkpoint_path: "checkpoints/best_model/model.pt"
+  load_weights_only: true  # Reset epoch/optimizer/scheduler, keep weights only
   eval_num_samples: 20  # Number of samples to evaluate on
   warmup_steps: 100  # Shorter warmup for post-training (was 200)
   min_lr_ratio: 0.01  # Minimum LR as fraction of peak (0.01 = 1% of learning_rate, e.g., 1.2e-6)
