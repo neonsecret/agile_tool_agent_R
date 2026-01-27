@@ -66,15 +66,20 @@ class GenerationOperations:
         )
         prompt_ids = torch.tensor(prompt_ids_list, dtype=torch.long, device=self.device).unsqueeze(0)
         prompt_len = prompt_ids.shape[1]
+        attention_mask = torch.ones_like(prompt_ids, dtype=torch.long, device=self.device)
 
-        output_ids = self.model.base_llm.generate(
-            prompt_ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=do_sample,
-            temperature=temperature,
-            top_p=top_p,
-            pad_token_id=self.tokenizer.pad_token_id,
-        )
+        generate_kwargs = {
+            "input_ids": prompt_ids,
+            "attention_mask": attention_mask,
+            "max_new_tokens": max_new_tokens,
+            "do_sample": do_sample,
+            "pad_token_id": self.tokenizer.pad_token_id,
+        }
+        if do_sample:
+            generate_kwargs["temperature"] = temperature
+            generate_kwargs["top_p"] = top_p
+
+        output_ids = self.model.base_llm.generate(**generate_kwargs)
 
         gen_ids = output_ids[0, prompt_len:]
         generated_raw = self.tokenizer.decode(
@@ -87,6 +92,7 @@ class GenerationOperations:
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )
+        del attention_mask
         return generated_raw, generated_clean
 
     def generate_chat(self, prompt: str, max_new_tokens: int = 256) -> str:

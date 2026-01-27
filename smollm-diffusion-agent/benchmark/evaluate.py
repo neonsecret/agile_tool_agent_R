@@ -167,6 +167,7 @@ def evaluate_base_model(data, device):
             tokenizer, messages, tools=tools, add_generation_prompt=True
         )
         prompt_tensor = torch.tensor(prompt_ids, dtype=torch.long, device=device).unsqueeze(0)
+        attention_mask = torch.ones_like(prompt_tensor, dtype=torch.long, device=device)
 
         if device.type == "mps":
             torch.mps.synchronize()
@@ -177,6 +178,7 @@ def evaluate_base_model(data, device):
         with torch.no_grad():
             output_ids = model.generate(
                 prompt_tensor,
+                attention_mask=attention_mask,
                 max_new_tokens=256,
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id,
@@ -189,6 +191,7 @@ def evaluate_base_model(data, device):
         latencies.append((time.perf_counter() - start) * 1000)
 
         gen_ids = output_ids[0, len(prompt_ids):]
+        del attention_mask
         generated = tokenizer.decode(gen_ids, skip_special_tokens=False)
         prediction = parse_first_tool_call(generated)
 
@@ -291,10 +294,18 @@ def evaluate_diffusion_model(data, device):
     if null_token_id is not None:
         model.diffusion_head.set_null_token_id(null_token_id)
 
+    infer_cfg = config.get("inference", {})
+    remask_cfg = infer_cfg.get("remasking", {})
     generator = FunctionCallGenerator(model, tokenizer, device)
     gen_config = GenerationConfig(
-        steps=config["inference"].get("steps", config["diffusion"]["num_steps"]),
-        temperature=config["inference"].get("temperature", 0.0),
+        steps=infer_cfg.get("steps", config["diffusion"]["num_steps"]),
+        temperature=infer_cfg.get("temperature", 0.0),
+        cfg_scale=infer_cfg.get("cfg_scale", 0.0),
+        use_cuda_graph=infer_cfg.get("use_cuda_graph", True),
+        enable_remasking=remask_cfg.get("enabled", True),
+        remask_ratio=remask_cfg.get("remask_ratio", 0.2),
+        min_lock_confidence=remask_cfg.get("min_lock_confidence", 0.7),
+        reencode_hidden_states_every=infer_cfg.get("reencode_hidden_states_every", 0),
     )
 
     reset_memory(device)
